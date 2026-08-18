@@ -9,15 +9,15 @@
 
 ## Resumo
 
-Este repositório documenta a formulação matemática rigorosa e a metodologia científica de resolução baseada em **Redes Neurais Informadas pela Física (Physics-Informed Neural Networks - PINNs)** aplicada ao **Problema de Liquidação Ótima Concorrente em Alta Frequência** sob o arcabouço de **Jogos de Campo Médio (Mean Field Games - MFG)**[cite: 1]. 
+Este repositório documenta a formulação matemática rigorosa e a metodologia científica de resolução baseada em **Redes Neurais Informadas pela Física (Physics-Informed Neural Networks - PINNs)** aplicada ao **Problema de Liquidação Ótima Concorrente em Alta Frequência** sob o arcabouço de **Jogos de Campo Médio (Mean Field Games - MFG)**.
 
-Em mercados eletrônicos, grandes participantes institucionais liquidam posições expressivas de ativos sob impacto de mercado permanente e temporário[cite: 1]. A concorrência agregada deteriora a profundidade do livro de ofertas (*Limit Order Book*), estabelecendo um jogo diferencial estocástico não-cooperativo[cite: 1]. O equilíbrio de Nash macroscópico é caracterizado por um sistema acoplado bidirecional de Equações Diferenciais Parciais (EDPs): uma equação *backward* de **Hamilton-Jacobi-Bellman (HJB)** para o controle ótimo individual e uma equação *forward* de **Fokker-Planck (FP)** para a distribuição agregada de inventário[cite: 1].
+Em mercados eletrônicos, grandes participantes institucionais liquidam posições expressivas de ativos sob impacto de mercado permanente e temporário. A concorrência agregada deteriora a profundidade do livro de ofertas (*Limit Order Book*), estabelecendo um jogo diferencial estocástico não-cooperativo. O equilíbrio de Nash macroscópico é caracterizado por um sistema acoplado bidirecional de Equações Diferenciais Parciais (EDPs): uma equação *backward* de **Hamilton-Jacobi-Bellman (HJB)** para o controle ótimo individual e uma equação *forward* de **Fokker-Planck (FP)** para a distribuição agregada de inventário.
 
 ---
 
 ## 1. Formulação do Modelo e Fundamentação Econômica
 
-Considera-se um horizonte contínuo de negociação $t \in [0, T]$ e um contínuo de investidores institucionais representativos[cite: 1]. O inventário de ações detido por um fundo individual no instante $t$ é denotado por $X_t \in \mathbb{R}$[cite: 1].
+Considera-se um horizonte contínuo de negociação $t \in [0, T]$ e um contínuo de investidores institucionais representativos. O inventário de ações detido por um fundo individual no instante $t$ é denotado por $X_t \in \mathbb{R}$.
 
 ```
 +-------------------------------------------------------------------------------+
@@ -34,67 +34,67 @@ Considera-se um horizonte contínuo de negociação $t \in [0, T]$ e um contínu
 ```
 
 ### 1.1 Dinâmica Estocástica Individual do Inventário
-O inventário individual é governado pela Equação Diferencial Estocástica (EDE) de Itô[cite: 1]:
+O inventário individual é governado pela Equação Diferencial Estocástica (EDE) de Itô:
 
 $$dX_t = \nu_t \, dt + \sigma \, dW_t$$
 
 onde:
-* $\nu_t \in \mathbb{R}$ representa a taxa de negociação ou velocidade de liquidação controlada pelo agente ($\nu_t < 0$ indica venda de ativos)[cite: 1];
-* $\sigma > 0$ é a volatilidade idiossincrática associada ao fluxo estocástico de ordens e execuções parciais[cite: 1];
-* $W_t$ é um Movimento Browniano escalar padrão definido em um espaço de probabilidade filtrado $(\Omega, \mathcal{F}, \{\mathcal{F}_t\}_{t \ge 0}, \mathbb{P})$[cite: 1].
+* $\nu_t \in \mathbb{R}$ representa a taxa de negociação ou velocidade de liquidação controlada pelo agente ($\nu_t < 0$ indica venda de ativos);
+* $\sigma > 0$ é a volatilidade idiossincrática associada ao fluxo estocástico de ordens e execuções parciais;
+* $W_t$ é um Movimento Browniano escalar padrão definido em um espaço de probabilidade filtrado $(\Omega, \mathcal{F}, \{\mathcal{F}_t\}_{t \ge 0}, \mathbb{P})$.
 
 ### 1.2 Funcional de Custo Intertemporal
-O agente busca uma política de controle ótimo $\nu \in \mathcal{A}$ que minimize a esperança matemática do custo total acumulado de desinvestimento[cite: 1]:
+O agente busca uma política de controle ótimo $\nu \in \mathcal{A}$ que minimize a esperança matemática do custo total acumulado de desinvestimento:
 
 $$J(\nu; x, t) = \mathbb{E} \left[ \int_t^T \left( \frac{\eta}{2}\nu_s^2 + \lambda X_s^2 + \gamma \, m(X_s, s) \right) ds + \frac{\alpha_{\text{pen}}}{2} X_T^2 \;\middle|\; X_t = x \right]$$
 
 O funcional é decomposto em quatro componentes financeiros:
-1. **Impacto Temporário de Mercado ($\frac{\eta}{2}\nu^2$):** Penalidade convexa associada ao atrito e consumo instantâneo de liquidez ($\eta > 0$)[cite: 1].
-2. **Risco de Carregamento de Inventário ($\lambda X^2$):** Custo de oportunidade e aversão ao risco de carregar posições abertas sob oscilações de preços ($\lambda > 0$)[cite: 1].
-3. **Congestionamento de Campo Médio ($\gamma \, m(x, t)$):** Penalidade competitiva ($\gamma > 0$)[cite: 1]. Quanto maior a densidade de fundos $m(x, t)$ liquidando na mesma faixa de volume $x$, maior a taxa de derrapagem (*slippage*) coletiva[cite: 1].
-4. **Penalidade Terminal de Execução ($\frac{\alpha_{\text{pen}}}{2} X_T^2$):** Custo de liquidação forçada no instante terminal $T$, impondo $X_T \to 0$ ($\alpha_{\text{pen}} \gg 0$)[cite: 1].
+1. **Impacto Temporário de Mercado ($\frac{\eta}{2}\nu^2$):** Penalidade convexa associada ao atrito e consumo instantâneo de liquidez ($\eta > 0$).
+2. **Risco de Carregamento de Inventário ($\lambda X^2$):** Custo de oportunidade e aversão ao risco de carregar posições abertas sob oscilações de preços ($\lambda > 0$).
+3. **Congestionamento de Campo Médio ($\gamma \, m(x, t)$):** Penalidade competitiva ($\gamma > 0$). Quanto maior a densidade de fundos $m(x, t)$ liquidando na mesma faixa de volume $x$, maior a taxa de derrapagem (*slippage*) coletiva.
+4. **Penalidade Terminal de Execução ($\frac{\alpha_{\text{pen}}}{2} X_T^2$):** Custo de liquidação forçada no instante terminal $T$, impondo $X_T \to 0$ ($\alpha_{\text{pen}} \gg 0$).
 
 ---
 
 ## 2. O Sistema de EDPs Acopladas de Mean Field Games
 
-Definindo a função de valor ótimo individual[cite: 1]:
+Definindo a função de valor ótimo individual:
 
 $$u(x, t) = \inf_{\nu \in \mathcal{A}} J(\nu; x, t)$$
 
 ### 2.1 Equação de Hamilton-Jacobi-Bellman (HJB)
-Pelo Princípio da Programação Dinâmica, $u(x, t)$ satisfaz a EDP não-linear *backward*[cite: 1]:
+Pelo Princípio da Programação Dinâmica, $u(x, t)$ satisfaz a EDP não-linear *backward*:
 
 $$\partial_t u + \frac{1}{2}\sigma^2 \partial_{xx} u + \inf_{\nu \in \mathbb{R}} \left\{ \nu \, \partial_x u + \frac{\eta}{2}\nu^2 \right\} + \lambda x^2 + \gamma m(x, t) = 0$$
 
-A condição de primeira ordem fornece a velocidade ótima de venda[cite: 1]:
+A condição de primeira ordem fornece a velocidade ótima de venda:
 
 $$\frac{\partial}{\partial \nu}\left( \nu \, \partial_x u + \frac{\eta}{2}\nu^2 \right) = \partial_x u + \eta \nu = 0 \implies \nu^*(x, t) = -\frac{1}{\eta}\partial_x u(x, t)$$
 
-Substituindo $\nu^*(x, t)$, obtém-se a equação HJB na forma fechada[cite: 1]:
+Substituindo $\nu^*(x, t)$, obtém-se a equação HJB na forma fechada:
 
 $$\partial_t u + \frac{1}{2}\sigma^2 \partial_{xx} u - \frac{1}{2\eta}(\partial_x u)^2 + \lambda x^2 + \gamma m(x, t) = 0, \quad \forall (x, t) \in \mathbb{R} \times [0, T)$$
 
-com a condição de contorno terminal[cite: 1]:
+com a condição de contorno terminal:
 
 $$u(x, T) = \frac{\alpha_{\text{pen}}}{2} x^2$$
 
 ### 2.2 Equação de Fokker-Planck (FP)
-A densidade de distribuição macroscópica de inventário $m(x, t)$ satisfaz a equação de conservação *forward* de Kolmogorov sob o campo de velocidade ótimo $\nu^*(x, t)$[cite: 1]:
+A densidade de distribuição macroscópica de inventário $m(x, t)$ satisfaz a equação de conservação *forward* de Kolmogorov sob o campo de velocidade ótimo $\nu^*(x, t)$:
 
 $$\partial_t m - \frac{1}{2}\sigma^2 \partial_{xx} m + \partial_x \big( m(x, t) \cdot \nu^*(x, t) \big) = 0$$
 
-Substituindo $\nu^*(x, t) = -\frac{1}{\eta}\partial_x u(x, t)$ e expandindo o termo advectivo[cite: 1]:
+Substituindo $\nu^*(x, t) = -\frac{1}{\eta}\partial_x u(x, t)$ e expandindo o termo advectivo:
 
 $$\partial_t m - \frac{1}{2}\sigma^2 \partial_{xx} m - \frac{1}{\eta} \partial_x \big( m(x, t) \, \partial_x u(x, t) \big) = 0$$
 
 $$\partial_t m - \frac{1}{2}\sigma^2 \partial_{xx} m - \frac{1}{\eta} \Big( \partial_x m \, \partial_x u + m \, \partial_{xx} u \Big) = 0, \quad \forall (x, t) \in \mathbb{R} \times (0, T]$$
 
-sujeita à condição de contorno inicial gaussiana[cite: 1]:
+sujeita à condição de contorno inicial gaussiana:
 
 $$m(x, 0) = m_0(x) = \frac{1}{\sqrt{2\pi \sigma_0^2}} \exp\left(-\frac{(x - x_0)^2}{2\sigma_0^2}\right)$$
 
-e à restrição estocástica de conservação de probabilidade unitária[cite: 1]:
+e à restrição estocástica de conservação de probabilidade unitária:
 
 $$\int_{-\infty}^{\infty} m(x, t) \, dx = 1, \quad \forall t \in [0, T]$$
 
@@ -102,7 +102,7 @@ $$\int_{-\infty}^{\infty} m(x, t) \, dx = 1, \quad \forall t \in [0, T]$$
 
 ## 3. Metodologia Physics-Informed Neural Networks (PINNs)
 
-O acoplamento do sistema é bidirecional com orientações temporais opostas ($t=T \to 0$ para HJB e $t=0 \to T$ para FP)[cite: 1]. A abordagem por PINN parametriza as soluções contínuas por duas redes neurais profundas simultâneas[cite: 1]:
+O acoplamento do sistema é bidirecional com orientações temporais opostas ($t=T \to 0$ para HJB e $t=0 \to T$ para FP). A abordagem por PINN parametriza as soluções contínuas por duas redes neurais profundas simultâneas:
 
 $$\hat{u}(x, t; \theta_u) \approx u(x, t) \quad \text{e} \quad \hat{m}(x, t; \theta_m) \approx m(x, t)$$
 
@@ -137,28 +137,28 @@ $$\hat{u}(x, t; \theta_u) \approx u(x, t) \quad \text{e} \quad \hat{m}(x, t; \th
 ```
 
 ### 3.1 Garantia Física de Positividade
-A não-negatividade estrita da densidade de probabilidade ($\hat{m} > 0$) é assegurada via transformação não-linear $\text{Softplus}$ na camada de saída de $\hat{m}$[cite: 1]:
+A não-negatividade estrita da densidade de probabilidade ($\hat{m} > 0$) é assegurada via transformação não-linear $\text{Softplus}$ na camada de saída de $\hat{m}$:
 
 $$\hat{m}(x, t; \theta_m) = \ln\left(1 + \exp\left(\mathcal{N}_m(x, t; \theta_m)\right)\right) > 0$$
 
 ### 3.2 Função de Perda Multiobjetivo
-O espaço paramétrico $\Theta = \{\theta_u, \theta_m\}$ é ajustado minimizando o funcional de perda composto[cite: 1]:
+O espaço paramétrico $\Theta = \{\theta_u, \theta_m\}$ é ajustado minimizando o funcional de perda composto:
 
 $$\mathcal{L}_{\text{total}}(\Theta) = w_{\text{hjb}} \mathcal{L}_{\text{HJB}} + w_{\text{fp}} \mathcal{L}_{\text{FP}} + w_{\text{term}} \mathcal{L}_{\text{term}} + w_{\text{init}} \mathcal{L}_{\text{init}} + w_{\text{massa}} \mathcal{L}_{\text{massa}}$$
 
-#### Resíduos Diferenciais no Interior do Domínio ($N_{\text{col}}$ pontos de colocalização)[cite: 1]
+#### Resíduos Diferenciais no Interior do Domínio ($N_{\text{col}}$ pontos de colocalização)
 
 $$\mathcal{L}_{\text{HJB}} = \frac{1}{N_{\text{col}}} \sum_{i=1}^{N_{\text{col}}} \left| \partial_t \hat{u} + \frac{1}{2}\sigma^2 \partial_{xx} \hat{u} - \frac{1}{2\eta}(\partial_x \hat{u})^2 + \lambda x_i^2 + \gamma \hat{m} \right|^2$$
 
 $$\mathcal{L}_{\text{FP}} = \frac{1}{N_{\text{col}}} \sum_{i=1}^{N_{\text{col}}} \left| \partial_t \hat{m} - \frac{1}{2}\sigma^2 \partial_{xx} \hat{m} - \frac{1}{\eta} \big( \partial_x \hat{m} \, \partial_x \hat{u} + \hat{m} \, \partial_{xx} \hat{u} \big) \right|^2$$
 
-#### Resíduos de Contorno Espaço-Temporal ($N_{\text{bc}}$ pontos de contorno)[cite: 1]
+#### Resíduos de Contorno Espaço-Temporal ($N_{\text{bc}}$ pontos de contorno)
 
 $$\mathcal{L}_{\text{term}} = \frac{1}{N_{\text{bc}}} \sum_{j=1}^{N_{\text{bc}}} \left| \hat{u}(x_j, T) - \frac{\alpha_{\text{pen}}}{2} x_j^2 \right|^2$$
 
 $$\mathcal{L}_{\text{init}} = \frac{1}{N_{\text{bc}}} \sum_{j=1}^{N_{\text{bc}}} \left| \hat{m}(x_j, 0) - m_0(x_j) \right|^2$$
 
-#### Conservação Contínua da Massa de Probabilidade ($K$ fatias temporais)[cite: 1]
+#### Conservação Contínua da Massa de Probabilidade ($K$ fatias temporais)
 
 $$\mathcal{L}_{\text{massa}} = \frac{1}{K} \sum_{k=1}^K \left( \sum_{l=1}^{M_x} \hat{m}(x_l, t_k) \Delta x - 1.0 \right)^2$$
 
@@ -166,7 +166,7 @@ $$\mathcal{L}_{\text{massa}} = \frac{1}{K} \sum_{k=1}^K \left( \sum_{l=1}^{M_x} 
 
 ## 4. Calibração de Hiperparâmetros do Sistema
 
-A tabela a seguir consolida a parametrização econômica e computacional calibrada para a simulação de liquidação institucional intraday ($T = 1.0$)[cite: 1]:
+A tabela a seguir consolida a parametrização econômica e computacional calibrada para a simulação de liquidação institucional intraday ($T = 1.0$):
 
 | Categoria | Hiperparâmetro | Símbolo | Valor Calibrado | Significado Econômico / Computacional |
 | :--- | :--- | :--- | :--- | :--- |
