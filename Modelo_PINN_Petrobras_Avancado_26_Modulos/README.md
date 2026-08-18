@@ -59,99 +59,143 @@ Além da resolução da PIDE via PINN, o modelo incorpora **26 módulos**, dos q
 
 ### 3.1 Processo Estocástico Multi-Fatorial
 
-O preço à vista \(S_t\), o rendimento de conveniência \(\delta_t\) e a variância \(v_t\) seguem o sistema:
+O preço à vista \( S_t \), o rendimento de conveniência \( \delta_t \) e a variância \( v_t \) seguem o sistema:
 
 $$
 \begin{aligned}
-\frac{dS_t}{S_t} &= (r - \delta_t - \lambda \kappa) \, dt + \sqrt{v_t}\, dW_t^S + (e^{J}-1)\, dN_t, \\[6pt]
-d\delta_t &= \kappa_\delta (\theta_\delta - \delta_t)\, dt + \sigma_\delta\, dW_t^\delta, \\[6pt]
-dv_t &= \kappa_v (\theta_v - v_t)\, dt + \xi \sqrt{v_t}\, dW_t^v,
+\frac{dS_t}{S_t} &= (r - \delta_t - \lambda \kappa)\, dt + \sqrt{v_t}\, dW_t^{S} + (e^{J}-1)\, dN_t, \\[8pt]
+d\delta_t &= \kappa_{\delta}(\theta_{\delta} - \delta_t)\, dt + \sigma_{\delta}\, dW_t^{\delta}, \\[8pt]
+dv_t &= \kappa_{v}(\theta_{v} - v_t)\, dt + \xi\sqrt{v_t}\, dW_t^{v}.
 \end{aligned}
 $$
 
-onde:
+**Onde:**
 
-- \(r\) = taxa livre de risco (Selic);
-- \(\lambda\) = intensidade do processo de Poisson \(N_t\);
-- \(J \sim \mathcal{N}(\mu_J, \sigma_J^2)\) = tamanho do salto log-normal;
-- \(\kappa = \mathbb{E}[e^J - 1]\) = compensador de salto;
-- \(W^S, W^\delta, W^v\) = movimentos brownianos correlacionados com matriz de correlação \(\Rho\).
+- \( r \) = taxa livre de risco (Selic);
+- \( \lambda \) = intensidade do processo de Poisson \( N_t \);
+- \( J \sim \mathcal{N}(\mu_J, \sigma_J^{2}) \) = tamanho do salto log-normal;
+- \( \kappa = \mathbb{E}[e^{J}-1] \) = compensador de salto;
+- \( W^{S},\; W^{\delta},\; W^{v} \) = movimentos brownianos correlacionados com matriz de correlação \( \Rho \).
+
+---
 
 ### 3.2 Equação PIDE com Mudança de Regime
 
-Seja \(V_i(S,\delta,v,t)\) o preço do derivativo no regime \(i \in \{1,2\}\). A PIDE acoplada é:
+Seja \( V_{i}(S,\delta,v,t) \) o preço do derivativo no regime \( i \in \{1,2\} \).  
+A PIDE acoplada é dada por:
+
+**Termos de deriva e temporal:**
 
 $$
-\begin{aligned}
-\frac{\partial V_i}{\partial t} &+ (r-\delta-\lambda\kappa)S\frac{\partial V_i}{\partial S}
-+ \kappa_\delta(\theta_\delta-\delta)\frac{\partial V_i}{\partial \delta}
-+ \kappa_v(\theta_v-v)\frac{\partial V_i}{\partial v} \\[4pt]
-&+ \tfrac12 v S^2 \frac{\partial^2 V_i}{\partial S^2}
-+ \tfrac12 \sigma_\delta^2 \frac{\partial^2 V_i}{\partial \delta^2}
-+ \tfrac12 \xi^2 v \frac{\partial^2 V_i}{\partial v^2} \\[4pt]
-&+ \rho_{S\delta}\sigma_\delta S\sqrt{v}\,\frac{\partial^2 V_i}{\partial S\partial\delta}
-+ \rho_{Sv}\xi S v\,\frac{\partial^2 V_i}{\partial S\partial v}
-+ \rho_{\delta v}\sigma_\delta\xi\sqrt{v}\,\frac{\partial^2 V_i}{\partial \delta\partial v} \\[4pt]
-&+ \lambda\int_{-\infty}^{\infty}\bigl(V_i(Se^z,\delta,v,t)-V_i(S,\delta,v,t)\bigr)\nu(dz) \\[4pt]
-&+ q_{ij}(V_j - V_i)
-- r V_i = 0,
-\end{aligned}
+\frac{\partial V_{i}}{\partial t}
++ (r - \delta - \lambda\kappa)\, S\, \frac{\partial V_{i}}{\partial S}
++ \kappa_{\delta}(\theta_{\delta}-\delta)\, \frac{\partial V_{i}}{\partial \delta}
++ \kappa_{v}(\theta_{v}-v)\, \frac{\partial V_{i}}{\partial v}
 $$
 
-com \(q_{12}=\lambda_{1\to2}\), \(q_{21}=\lambda_{2\to1}\) as taxas de transição de Markov.
+**Termos de difusão de segunda ordem:**
+
+$$
++ \frac{1}{2}\, v\, S^{2}\, \frac{\partial^{2} V_{i}}{\partial S^{2}}
++ \frac{1}{2}\, \sigma_{\delta}^{2}\, \frac{\partial^{2} V_{i}}{\partial \delta^{2}}
++ \frac{1}{2}\, \xi^{2}\, v\, \frac{\partial^{2} V_{i}}{\partial v^{2}}
+$$
+
+**Termos de correlação cruzada:**
+
+$$
++ \rho_{S\delta}\, \sigma_{\delta}\, S\sqrt{v}\, \frac{\partial^{2} V_{i}}{\partial S\,\partial\delta}
++ \rho_{Sv}\, \xi\, S\, v\, \frac{\partial^{2} V_{i}}{\partial S\,\partial v}
++ \rho_{\delta v}\, \sigma_{\delta}\, \xi\sqrt{v}\, \frac{\partial^{2} V_{i}}{\partial \delta\,\partial v}
+$$
+
+**Termo de salto (integral de Lévy) + acoplamento de regime + desconto:**
+
+$$
++ \lambda \int_{-\infty}^{\infty}
+\Bigl(
+V_{i}(S e^{z},\delta,v,t) - V_{i}(S,\delta,v,t)
+\Bigr)\, \nu(dz)
++ q_{ij}(V_{j} - V_{i})
+- r\, V_{i}
+= 0.
+$$
+
+**Taxas de transição de Markov:**
+
+$$
+q_{12} = \lambda_{1\to 2},\qquad q_{21} = \lambda_{2\to 1}.
+$$
+
+---
 
 ### 3.3 Condição Terminal e Fronteira Livre (Opção Americana)
 
-No vencimento \(t=T\):
+No vencimento \( t = T \):
 
 $$
-V_i(S,\delta,v,T) = \max(S-K, 0).
+V_{i}(S,\delta,v,T) = \max(S - K,\, 0).
 $$
 
-Para opções americanas a condição de complementaridade de Fischer-Burmeister é imposta:
+Para opções americanas impõe-se a condição de complementaridade de **Fischer-Burmeister**:
 
 $$
-\Phi_{\text{FB}}(a,b) = a + b - \sqrt{a^2 + b^2 + \varepsilon} = 0,
+\Phi_{\mathrm{FB}}(a,b) = a + b - \sqrt{a^{2} + b^{2} + \varepsilon} = 0,
 $$
 
-onde \(a = V - (S-K)^+\) e \(b = -\mathcal{L}V\) (operador da PIDE).
+onde
+
+$$
+a = V - (S-K)^{+},\qquad b = -\mathcal{L}V
+$$
+
+e \( \mathcal{L} \) denota o operador da PIDE.
+
+---
 
 ### 3.4 Função de Perda da PINN
 
-A perda total é a combinação ponderada adaptativa:
+A perda total é a combinação ponderada adaptativa (uncertainty weighting):
 
 $$
-\mathcal{L} = e^{-s_{\text{PDE}}}\mathcal{L}_{\text{PDE}} + s_{\text{PDE}}
-+ e^{-s_{\text{BC}}}\mathcal{L}_{\text{BC}} + s_{\text{BC}}
-+ e^{-s_{\text{FB}}}\mathcal{L}_{\text{FB}} + s_{\text{FB}},
+\mathcal{L}
+= e^{-s_{\mathrm{PDE}}}\,\mathcal{L}_{\mathrm{PDE}} + s_{\mathrm{PDE}}
++ e^{-s_{\mathrm{BC}}}\,\mathcal{L}_{\mathrm{BC}} + s_{\mathrm{BC}}
++ e^{-s_{\mathrm{FB}}}\,\mathcal{L}_{\mathrm{FB}} + s_{\mathrm{FB}}.
 $$
 
-onde os pesos \(s_\bullet\) são parâmetros aprendíveis (uncertainty weighting de Kendall & Gal).
+Os pesos \( s_{\bullet} \) são parâmetros aprendíveis (Kendall & Gal, 2017).
+
+---
 
 ### 3.5 Gregas via Diferenciação Automática
 
 $$
 \begin{aligned}
-\Delta &= \frac{\partial V}{\partial S}, \quad
-\Gamma = \frac{\partial^2 V}{\partial S^2}, \quad
-\mathcal{V} = \frac{\partial V}{\partial v}, \\[4pt]
-\text{Vanna} &= \frac{\partial^2 V}{\partial S\partial v}, \quad
-\Theta = -\frac{\partial V}{\partial t}.
+\Delta &= \frac{\partial V}{\partial S}, &
+\Gamma &= \frac{\partial^{2} V}{\partial S^{2}}, &
+\mathcal{V} &= \frac{\partial V}{\partial v}, \\[10pt]
+\mathrm{Vanna} &= \frac{\partial^{2} V}{\partial S\,\partial v}, &
+\Theta &= -\frac{\partial V}{\partial t}.
 \end{aligned}
 $$
 
+---
+
 ### 3.6 Métricas de Risco (Módulo 23)
 
-**Value-at-Risk** (nível \(\alpha\)):
+**Value-at-Risk** (nível de confiança \( \alpha \)):
 
 $$
-\text{VaR}_\alpha = \inf\{ x \in \mathbb{R} : P(L > x) \le 1-\alpha \}.
+\mathrm{VaR}_{\alpha}
+= \inf\bigl\{\, x \in \mathbb{R} :\; P(L > x) \le 1-\alpha \,\bigr\}.
 $$
 
-**Expected Shortfall**:
+**Expected Shortfall** (Conditional VaR):
 
 $$
-\text{ES}_\alpha = \mathbb{E}[L \mid L \ge \text{VaR}_\alpha].
+\mathrm{ES}_{\alpha}
+= \mathbb{E}\bigl[ L \mid L \ge \mathrm{VaR}_{\alpha} \bigr].
 $$
 
 ---
@@ -214,9 +258,10 @@ Modelo_PINN_Petrobras_Avancado_26_Modulos/
 ## 8. Licença e Autoria
 
 **Autor:** Luiz Tiago Wilcke  
+
 Código desenvolvido para fins acadêmicos e de pesquisa quantitativa.  
 Uso livre mediante citação do autor.
 
 ---
 
-
+*Gerado em Agosto de 2026 — Modelo PINN multi-fatorial com 26 módulos e estatística avançada.*
