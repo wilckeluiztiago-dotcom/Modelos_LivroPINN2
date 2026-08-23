@@ -86,7 +86,7 @@ NanoTransistor_PINN_2nm_LuizTiagoWilcke/
 │   ├── otimizacao_hibrida.py              # Adam → L-BFGS
 │   ├── autograd_gregas.py                 # Δ, Γ via Autograd
 │   ├── transporte_balistico.py            # Landauer / Top-of-Barrier
-│   ├── negf_simplificado.py               # Densidade espectral Lorentziana
+│   ├── negf_2.py                          # Densidade espectral Lorentziana
 │   ├── self_consistent_loop.py            # Loop Poisson auto-consistente
 │   ├── calibracao_inversa.py              # Inverse doping / work-function
 │   ├── ruido_rdf.py                       # Random Dopant Fluctuation
