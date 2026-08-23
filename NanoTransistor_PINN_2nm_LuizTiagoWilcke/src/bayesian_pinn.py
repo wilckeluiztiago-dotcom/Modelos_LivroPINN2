@@ -1,15 +1,19 @@
-"""Módulo: Bayesian PINN via Monte Carlo Dropout & Heteroscedastic UQ
+"""Módulo: Bayesian PINN com Propagação Quântica de Incerteza (NEGF & Landauer)
 
 Autor: Luiz Tiago Wilcke
-Descrição: Framework completo de Quantificação de Incerteza (UQ) em PINNs:
-           1. Teoria de Gal & Ghahramani (Dropout como Inferência Variacional em Processos Gaussianos).
-           2. Decomposição de Incerteza Total: Epistêmica (modelo/falta de dados) e Aleatória (ruído).
-           3. Diferenciação Automática (Autograd) com caminhos estocásticos de Dropout para cálculo de PDE.
-           4. Calibração e intervalos de confiança analíticos (68%, 95% e 99.7%).
-           5. Aplicação completa na equação de Poisson reduzida para nanotransistores.
+Descrição: Framework integrado para Quantificação de Incerteza (UQ) em Nanoeletrônica:
+           1. Bayesian PINN via Monte Carlo Dropout com preservação estrita de
+           estado.
+           2. Pipeline de propagação quântica estocástica:
+              phi^(k)(x) -> U^(k)(x) -> G^R,(k) -> T^(k)(E) -> I_D^(k)
+           3. Extração de distribuições preditivas completas:
+              - Incerteza espacial no potencial: mu_phi(x) +- sigma_phi(x)
+              - Incerteza no transporte: mu_I(Vgs, Vds) +- sigma_I(Vgs, Vds)
+              - Bandas de confiança bayesianas nas curvas características
+              I_D(V_GS) e I_D(V_DS).
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -17,16 +21,194 @@ import torch.nn as nn
 import torch.optim as optim
 
 # =============================================================================
-# 1. ARQUITETURA DA REDE COM MONTE CARLO DROPOUT E DUPLA CABEÇA (UQ)
+# 1. CONSTANTES FÍSICAS E ESPECIFICAÇÃO DO DISPOSITIVO
 # =============================================================================
 
 
-class MCDropoutPINN(nn.Module):
-  """Physics-Informed Neural Network Bayesiana aproximada via Monte Carlo Dropout.
+class ConstantesFisicas:
+  """Constantes fundamentais no SI e conversões de energia."""
 
-  Implementa arquitetura com dupla cabeça para decomposição explícita:
-    - Cabeça 1 (Média μ): Predição do potencial eletrostático φ(x).
-    - Cabeça 2 (Log-Variância log(s²)): Incerteza aleatória intrínseca (ruído heterocedástico).
+  Q_E: float = 1.602176634e-19  # C
+  H_PLANCK: float = 6.62607015e-34  # J·s
+  H_BAR: float = 1.054571817e-34  # J·s
+  M_E: float = 9.1093837e-31  # kg
+  K_B_EV: float = 8.617333262e-5  # eV/K
+  EPS_0: float = 8.8541878128e-12  # F/m
+  EPS_SI: float = 11.7 * 8.8541878128e-12  # Silício (eps_r = 11.7)
+  G0: float = 2.0 * (1.602176634e-19**2) / 6.62607015e-34  # ~77.48 µS
+
+
+class GeometriaDispositivo:
+  """Geometria transversal e parâmetros de confinamento."""
+
+  def __init__(
+      self,
+      L_canal: float = 15.0e-9,  # 15 nm
+      W_largura: float = 5.0e-9,  # 5 nm
+      T_corpo: float = 3.0e-9,  # 3 nm
+      lambda_gate: float = 2.2e-9,  # 2.2 nm
+  ):
+    self.L = L_canal
+    self.W = W_largura
+    self.T_body = T_corpo
+    self.lambda_g = lambda_gate
+    self.A_cross = self.W * self.T_body  # m²
+
+  def densidade_1d_para_3d(self, n_1d: torch.Tensor) -> torch.Tensor:
+    """Conversão dimensionalmente consistente de m⁻¹ para m⁻³."""
+    return n_1d / self.A_cross
+
+
+# =============================================================================
+# 2. SOLVER TIGHT-BINDING NEGF 1D (RESOLUÇÃO MATRICIAL VETORIZADA)
+# =============================================================================
+
+
+class TightBindingNEGF1D:
+  """Solver Quântico 1D baseado em Funções de Green Não-Equilíbrio (NEGF)."""
+
+  def __init__(
+      self,
+      N_sites: int,
+      dx: float,
+      m_eff: float = 0.20,
+      E_F: float = 0.0,
+      T: float = 300.0,
+      device: torch.device = torch.device("cpu"),
+  ):
+    self.N = N_sites
+    self.dx = dx
+    self.m_eff = m_eff
+    self.E_F = E_F
+    self.kBT = max(ConstantesFisicas.K_B_EV * T, 1e-7)
+    self.device = device
+
+    # Hopping cinético t0 = hbar² / (2 * m* * dx²) em eV
+    t0_j = (ConstantesFisicas.H_BAR**2) / (
+        2.0 * (self.m_eff * ConstantesFisicas.M_E) * (self.dx**2)
+    )
+    self.t0 = float(t0_j / ConstantesFisicas.Q_E)
+
+    # Hamiltoniano cinético tridiagonal
+    diag_k = 2.0 * self.t0 * torch.ones(self.N, dtype=torch.float64)
+    off_k = -self.t0 * torch.ones(self.N - 1, dtype=torch.float64)
+    self.H_kin = (
+        torch.diag(diag_k) + torch.diag(off_k, 1) + torch.diag(off_k, -1)
+    ).to(self.device)
+
+    self.I_mat = torch.eye(
+        self.N, dtype=torch.complex128, device=self.device
+    )
+
+  def fermi_dirac(
+      self, E: torch.Tensor, mu: float
+  ) -> torch.Tensor:
+    arg = torch.clamp(-(E - mu) / self.kBT, -80.0, 80.0)
+    return torch.sigmoid(arg)
+
+  def calcular_sigma_lead(
+      self, E_grid: torch.Tensor, U_lead: float
+  ) -> torch.Tensor:
+    """Autoenergia analítica para contatos semi-infinitos 1D (Open Boundary)."""
+    theta = (E_grid - U_lead - 2.0 * self.t0) / (2.0 * self.t0)
+    sigma = torch.zeros_like(E_grid, dtype=torch.complex128)
+
+    # Banda de condução
+    m_band = torch.abs(theta) <= 1.0
+    if m_band.any():
+      th = theta[m_band]
+      sigma[m_band] = torch.complex(
+          self.t0 * th, -self.t0 * torch.sqrt(1.0 - th**2)
+      )
+
+    # Estados evanescentes abaixo
+    m_bel = theta < -1.0
+    if m_bel.any():
+      th = theta[m_bel]
+      sigma[m_bel] = torch.complex(
+          self.t0 * (th + torch.sqrt(th**2 - 1.0)), torch.zeros_like(th)
+      )
+
+    # Estados evanescentes acima
+    m_abv = theta > 1.0
+    if m_abv.any():
+      th = theta[m_abv]
+      sigma[m_abv] = torch.complex(
+          self.t0 * (th - torch.sqrt(th**2 - 1.0)), torch.zeros_like(th)
+      )
+
+    return sigma
+
+  def resolver_transporte(
+      self,
+      U_potencial: torch.Tensor,
+      Vds: float,
+      E_grid: torch.Tensor,
+  ) -> Tuple[torch.Tensor, torch.Tensor, float]:
+    """Calcula densidade linear n_1D(x) [m⁻¹], Transmissão T(E) e Corrente I_DS [A]."""
+    n_E = E_grid.shape[0]
+    H_total = self.H_kin + torch.diag(U_potencial.to(torch.float64))
+    H_c = H_total.to(torch.complex128)
+
+    mu_S = self.E_F
+    mu_D = self.E_F - Vds
+
+    sig_S = self.calcular_sigma_lead(E_grid, float(U_potencial[0].item()))
+    sig_D = self.calcular_sigma_lead(E_grid, float(U_potencial[-1].item()))
+
+    # Montagem do sistema linear vetorial em lote: A(E) * G^R(E) = I
+    A_batch = (
+        (E_grid.to(torch.complex128) + 1e-7j).view(-1, 1, 1)
+        * self.I_mat.unsqueeze(0)
+    ) - H_c.unsqueeze(0)
+    A_batch = A_batch.clone()
+    A_batch[:, 0, 0] -= sig_S
+    A_batch[:, -1, -1] -= sig_D
+
+    I_exp = self.I_mat.unsqueeze(0).expand(n_E, self.N, self.N)
+    G_R_batch = torch.linalg.solve(A_batch, I_exp)
+
+    gamma_S = -2.0 * sig_S.imag
+    gamma_D = -2.0 * sig_D.imag
+
+    # Transmissão Quântica T(E) = Gamma_S * Gamma_D * |G^R_{0, N-1}|²
+    G_R_0N = G_R_batch[:, 0, -1]
+    T_E = torch.clamp(
+        gamma_S * gamma_D * (G_R_0N.real**2 + G_R_0N.imag**2), min=0.0
+    )
+
+    f_S = self.fermi_dirac(E_grid, mu_S)
+    f_D = self.fermi_dirac(E_grid, mu_D)
+
+    # Densidade Linear via G^<
+    G_R_i0_sq = G_R_batch[:, :, 0].real ** 2 + G_R_batch[:, :, 0].imag ** 2
+    G_R_iN_sq = G_R_batch[:, :, -1].real ** 2 + G_R_batch[:, :, -1].imag ** 2
+    G_lesser_diag = G_R_i0_sq * (gamma_S * f_S).unsqueeze(
+        -1
+    ) + G_R_iN_sq * (gamma_D * f_D).unsqueeze(-1)
+
+    dE = (E_grid[1] - E_grid[0]).item()
+    integrando_n = (2.0 / (2.0 * np.pi * self.dx)) * G_lesser_diag
+    n_1d = torch.sum(integrando_n, dim=0) * dE
+
+    # Corrente Landauer-Büttiker (Amperes)
+    integrando_I = T_E * (f_S - f_D)
+    I_ds = float(
+        ConstantesFisicas.G0 * torch.trapezoid(integrando_I, E_grid).item()
+    )
+
+    return n_1d, T_E, I_ds
+
+
+# =============================================================================
+# 3. BAYESIAN PINN (MONTE CARLO DROPOUT COM GERENCIAMENTO DE ESTADO)
+# =============================================================================
+
+
+class BayesianPINN(nn.Module):
+  """Rede Neural Informada pela Física Bayesiana com MC Dropout.
+
+  Implementa amostragem estocástica com contexto seguro (no_grad e preservação de estado).
   """
 
   def __init__(
@@ -35,245 +217,269 @@ class MCDropoutPINN(nn.Module):
       hidden_dim: int = 64,
       num_layers: int = 4,
       p_dropout: float = 0.10,
-      peso_decay_l2: float = 1e-5,
   ):
     super().__init__()
-    self.in_dim = in_dim
-    self.hidden_dim = hidden_dim
     self.p_dropout = p_dropout
-    self.peso_decay_l2 = peso_decay_l2
+    camadas = []
 
-    # Camada de entrada
-    camadas_tronco = [
-        nn.Linear(in_dim, hidden_dim),
-        nn.Tanh(),
-        nn.Dropout(p=p_dropout),
-    ]
-
-    # Camadas intermediárias
+    camadas.extend(
+        [nn.Linear(in_dim, hidden_dim), nn.Tanh(), nn.Dropout(p=p_dropout)]
+    )
     for _ in range(num_layers - 1):
-      camadas_tronco.extend([
+      camadas.extend([
           nn.Linear(hidden_dim, hidden_dim),
           nn.Tanh(),
           nn.Dropout(p=p_dropout),
       ])
+    camadas.append(nn.Linear(hidden_dim, 1))
 
-    self.tronco = nn.Sequential(*camadas_tronco)
+    self.rede = nn.Sequential(*camadas)
 
-    # Dupla cabeça de saída
-    self.cabeca_media = nn.Linear(hidden_dim, 1)  # Predição física: \mu(x)
-    self.cabeca_logvar = nn.Linear(
-        hidden_dim, 1
-    )  # Incerteza de observação: \log(\sigma^2)
-
-  def forward(
-      self, x: torch.Tensor
-  ) -> Tuple[torch.Tensor, torch.Tensor]:
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
     """Forward pass padrão."""
-    features = self.tronco(x)
-    mu = self.cabeca_media(features)
-    log_var = self.cabeca_logvar(features)
-    return mu, log_var
+    return self.rede(x)
 
-  def forward_com_dropout_forcado(
-      self, x: torch.Tensor
-  ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Força ativação do Dropout mesmo em modo de inferência (torch.no_grad)."""
-    # Ativa dropout mantendo o resto das camadas intactas
-    for m in self.modules():
-      if isinstance(m, nn.Dropout):
-        m.train()
-    features = self.tronco(x)
-    mu = self.cabeca_media(features)
-    log_var = self.cabeca_logvar(features)
-    return mu, log_var
-
-
-# =============================================================================
-# 2. MOTOR DE QUANTIFICAÇÃO DE INCERTEZA (EPISTÊMICA vs ALEATÓRIA)
-# =============================================================================
-
-
-class MotorIncertezaBayesiana:
-  """Calcula a distribuição preditiva posterior decompondo as fontes de incerteza."""
-
-  def __init__(self, modelo: MCDropoutPINN):
-    self.modelo = modelo
-
-  @torch.no_grad()
-  def predizer_distribuicao(
+  def amostrar_potenciais(
       self,
-      x: torch.Tensor,
-      n_amostras: int = 100,
-  ) -> Dict[str, torch.Tensor]:
-    """Gera N realizações estocásticas da rede e calcula as variâncias:
+      x_norm: torch.Tensor,
+      vgs_tensor: torch.Tensor,
+      vds_tensor: torch.Tensor,
+      n_amostras: int = 50,
+  ) -> torch.Tensor:
+    """Amostra N realizações do potencial phi^(k)(x) preservando o estado do grafo."""
+    estado_original = self.training
+    self.train()  # Ativa o dropout para amostragem estocástica
 
-    - Epistêmica: Incerteza do modelo (falta de dados/física) = Var_t(\mu_t(x))
-    - Aleatória: Ruído de medição = E_t(s_t^2(x))
-    - Total: \sigma_{tot}^2 = \sigma_{epi}^2 + \sigma_{ale}^2
+    inputs = torch.cat([x_norm, vgs_tensor, vds_tensor], dim=-1)
+
+    with torch.no_grad():
+      amostras = torch.stack(
+          [self.forward(inputs).squeeze(-1) for _ in range(n_amostras)], dim=0
+      )
+
+    self.train(estado_original)  # Restaura o estado original de treinamento
+    return amostras  # [n_amostras, N_pontos]
+
+
+# =============================================================================
+# 4. MOTOR DE PROPAGAÇÃO QUÂNTICA DE INCERTEZA (PINN -> NEGF -> UQ EM I_D)
+# =============================================================================
+
+
+class PropagadorIncertezaQuantica:
+  """Propaga as realizações estocásticas da Bayesian PINN através do solver NEGF.
+
+  Mapeamento: phi^(k)(x) -> U^(k)(x) -> G^R,(k) -> T^(k)(E) -> I_D^(k)
+  """
+
+  def __init__(
+      self,
+      pinn: BayesianPINN,
+      negf: TightBindingNEGF1D,
+      geom: GeometriaDispositivo,
+      E_grid: torch.Tensor,
+  ):
+    self.pinn = pinn
+    self.negf = negf
+    self.geom = geom
+    self.E_grid = E_grid
+
+  def avaliar_ponto_operacao(
+      self,
+      Vgs: float,
+      Vds: float,
+      n_amostras_mc: int = 40,
+  ) -> Dict[str, np.ndarray]:
+    """Calcula estatísticas bayesianas completas (Média, Desvio Padrão, Quantis)
+
+    para o potencial, densidade, transmissão e corrente terminal.
     """
-    amostras_mu = []
-    amostras_var_aleatoria = []
+    N_pts = self.negf.N
+    x_norm = (
+        torch.linspace(0, 1, N_pts, device=self.negf.device)
+        .unsqueeze(-1)
+        .to(torch.float32)
+    )
+    vgs_t = torch.full(
+        (N_pts, 1), Vgs, device=self.negf.device, dtype=torch.float32
+    )
+    vds_t = torch.full(
+        (N_pts, 1), Vds, device=self.negf.device, dtype=torch.float32
+    )
 
-    for _ in range(n_amostras):
-      mu_t, log_var_t = self.modelo.forward_com_dropout_forcado(x)
-      var_aleatoria_t = torch.exp(log_var_t)  # s^2(x) = exp(log_var)
+    # 1. Amostragem de potenciais da Bayesian PINN: phi^(k)(x)
+    amostras_phi = self.pinn.amostrar_potenciais(
+        x_norm, vgs_t, vds_t, n_amostras=n_amostras_mc
+    )
 
-      amostras_mu.append(mu_t)
-      amostras_var_aleatoria.append(var_aleatoria_t)
+    correntes_mc = []
+    transmissoes_mc = []
+    densidades_3d_mc = []
 
-    # Tensor: [n_amostras, N_pontos, 1]
-    tensor_mu = torch.stack(amostras_mu, dim=0)
-    tensor_var_aleatoria = torch.stack(amostras_var_aleatoria, dim=0)
+    # 2. Propagação através do NEGF para cada realização
+    for k in range(n_amostras_mc):
+      phi_k = amostras_phi[k].to(torch.float64)
+      U_pot_k = -phi_k  # U^(k)(x) = -q * phi^(k)(x) em eV
 
-    # 1. Média Preditiva
-    media_pred = tensor_mu.mean(dim=0)
+      n_1d_k, T_E_k, I_ds_k = self.negf.resolver_transporte(
+          U_pot_k, Vds, self.E_grid
+      )
+      n_3d_k = self.geom.densidade_1d_para_3d(n_1d_k)
 
-    # 2. Incerteza Epistêmica (Variância entre as predições do ensemble)
-    var_epistemica = tensor_mu.var(dim=0, unbiased=True)
-    std_epistemica = torch.sqrt(torch.clamp(var_epistemica, min=1e-12))
+      correntes_mc.append(I_ds_k)
+      transmissoes_mc.append(T_E_k.cpu().numpy())
+      densidades_3d_mc.append(n_3d_k.cpu().numpy())
 
-    # 3. Incerteza Aleatória (Média das variâncias intrínsecas estimadas)
-    var_aleatoria = tensor_var_aleatoria.mean(dim=0)
-    std_aleatoria = torch.sqrt(torch.clamp(var_aleatoria, min=1e-12))
-
-    # 4. Incerteza Total Combinada
-    var_total = var_epistemica + var_aleatoria
-    std_total = torch.sqrt(torch.clamp(var_total, min=1e-12))
-
-    # Intervalos de Confiança (Normal / Gaussiano)
-    ic_95_inf = media_pred - 1.96 * std_total
-    ic_95_sup = media_pred + 1.96 * std_total
+    arr_phi = amostras_phi.cpu().numpy()
+    arr_I = np.array(correntes_mc)
+    arr_T = np.array(transmissoes_mc)
+    arr_n3d = np.array(densidades_3d_mc)
 
     return {
-        "media": media_pred,
-        "std_epistemica": std_epistemica,
-        "std_aleatoria": std_aleatoria,
-        "std_total": std_total,
-        "ic_95_inf": ic_95_inf,
-        "ic_95_sup": ic_95_sup,
-        "amostras_brutas": tensor_mu,
+        "phi_media": np.mean(arr_phi, axis=0),
+        "phi_std": np.std(arr_phi, axis=0),
+        "phi_ic95_inf": np.percentile(arr_phi, 2.5, axis=0),
+        "phi_ic95_sup": np.percentile(arr_phi, 97.5, axis=0),
+        "I_media": float(np.mean(arr_I)),
+        "I_std": float(np.std(arr_I)),
+        "I_ic95_inf": float(np.percentile(arr_I, 2.5)),
+        "I_ic95_sup": float(np.percentile(arr_I, 97.5)),
+        "T_media": np.mean(arr_T, axis=0),
+        "T_std": np.std(arr_T, axis=0),
+        "n3d_media": np.mean(arr_n3d, axis=0),
+        "n3d_std": np.std(arr_n3d, axis=0),
+        "amostras_corrente": arr_I,
+    }
+
+  def varrer_curva_id_vg_com_incerteza(
+      self,
+      vgs_vetor: np.ndarray,
+      Vds_fixo: float = 0.35,
+      n_amostras_mc: int = 30,
+  ) -> Dict[str, np.ndarray]:
+    """Gera a curva de transferência completa I_D(V_GS) com bandas de incerteza bayesianas."""
+    medias_I = []
+    stds_I = []
+    ic_inf_I = []
+    ic_sup_I = []
+
+    print(
+        f"\n[UQ Transport] Propagando MC Dropout para curva Id-Vg (Vds ="
+        f" {Vds_fixo} V)..."
+    )
+    for vgs in vgs_vetor:
+      res_uq = self.avaliar_ponto_operacao(
+          float(vgs), Vds_fixo, n_amostras_mc=n_amostras_mc
+      )
+      medias_I.append(res_uq["I_media"])
+      stds_I.append(res_uq["I_std"])
+      ic_inf_I.append(res_uq["I_ic95_inf"])
+      ic_sup_I.append(res_uq["I_ic95_sup"])
+      print(
+          f"  Vgs = {vgs:+.2f} V | I_ds = {res_uq['I_media'] * 1e6:8.4f} +-"
+          f" {res_uq['I_std'] * 1e6:6.4f} µA (CV:"
+          f" {(res_uq['I_std'] / max(res_uq['I_media'], 1e-12)) * 100:5.1f}%)"
+      )
+
+    return {
+        "vgs": vgs_vetor,
+        "I_media": np.array(medias_I),
+        "I_std": np.array(stds_I),
+        "I_ic_inf": np.array(ic_inf_I),
+        "I_ic_sup": np.array(ic_sup_I),
     }
 
 
 # =============================================================================
-# 3. PERDAS FÍSICO-BAYESIANAS (HETEROSCEDASTIC NLL + RESÍDUO PDE VIA AUTOGRAD)
+# 5. TREINAMENTO DA BAYESIAN PINN COM RESÍDUO DE POISSON
 # =============================================================================
 
 
 class TreinadorBayesianPINN:
-  """Treina a PINN com perda de Verossimilhança Heterocedástica (NLL) e Resíduos de PDE."""
-
-  EPS_0 = 8.8541878128e-12
-  EPS_SI = 11.7 * 8.8541878128e-12
-  Q_E = 1.602176634e-19
+  """Treinamento com regularização L2 (Prior Gaussiano) e resíduo diferencial de Poisson."""
 
   def __init__(
       self,
-      modelo: MCDropoutPINN,
-      L_canal: float = 15e-9,
-      lambda_g: float = 2.2e-9,
-      lr: float = 1e-3,
+      pinn: BayesianPINN,
+      negf: TightBindingNEGF1D,
+      geom: GeometriaDispositivo,
+      N_dop_3d: torch.Tensor,
+      E_grid: torch.Tensor,
+      lr: float = 2e-3,
+      peso_decay: float = 1e-5,
   ):
-    self.modelo = modelo
-    self.L = L_canal
-    self.lambda_sq = lambda_g**2
-    # Otimizador Adam com regularização L2 (Weight Decay) equivalente ao Prior Gaussiano
-    self.opt = optim.Adam(
-        self.modelo.parameters(), lr=lr, weight_decay=modelo.peso_decay_l2
-    )
+    self.pinn = pinn
+    self.negf = negf
+    self.geom = geom
+    self.N_dop = N_dop_3d
+    self.E_grid = E_grid
+    self.opt = optim.Adam(self.pinn.parameters(), lr=lr, weight_decay=peso_decay)
 
-  def perda_heterocedastica(
-      self, y_real: torch.Tensor, mu_pred: torch.Tensor, log_var_pred: torch.Tensor
-  ) -> torch.Tensor:
-    """Negative Log-Likelihood (NLL) Gaussiana:
-
-    L_NLL = (1/2) * exp(-log_var) * (y - mu)^2 + (1/2) * log_var
-    """
-    precisao = torch.exp(-log_var_pred)
-    termo_erro = precisao * (y_real - mu_pred) ** 2
-    return 0.5 * torch.mean(termo_erro + log_var_pred)
-
-  def passo_treinamento(
-      self,
-      x_colocacao: torch.Tensor,
-      Vgs_val: float,
-      Vds_val: float,
-      x_dados: torch.Tensor,
-      phi_dados_ruidosos: torch.Tensor,
-      N_dop_colocacao: torch.Tensor,
-      n_eletrons_3d: torch.Tensor,
-  ) -> Dict[str, float]:
-    """Executa um passo de otimização estocástica com Autograd e Dropout ativos."""
+  def passo_treinamento(self, Vgs_val: float, Vds_val: float) -> Dict[str, float]:
+    """Passo de otimização com Dropout ativo durante a diferenciação automática."""
     self.opt.zero_grad()
-    self.modelo.train()  # Ativa dropout durante a amostragem de treinamento
+    self.pinn.train()
 
-    # -------------------------------------------------------------
-    # 1. Perda de Dados Observados (Contornos e Sensores com Ruído)
-    # -------------------------------------------------------------
-    vgs_d = torch.full_like(x_dados, Vgs_val)
-    vds_d = torch.full_like(x_dados, Vds_val)
-    input_dados = torch.cat([x_dados / self.L, vgs_d, vds_d], dim=-1)
+    N_pts = self.negf.N
+    x_real = torch.linspace(
+        0, self.geom.L, N_pts, dtype=torch.float32, requires_grad=True
+    ).unsqueeze(-1)
+    x_norm = x_real / self.geom.L
+    vgs_t = torch.full((N_pts, 1), Vgs_val, dtype=torch.float32)
+    vds_t = torch.full((N_pts, 1), Vds_val, dtype=torch.float32)
 
-    mu_dados, log_var_dados = self.modelo(input_dados)
-    loss_dados = self.perda_heterocedastica(
-        phi_dados_ruidosos, mu_dados, log_var_dados
-    )
+    inputs = torch.cat([x_norm, vgs_t, vds_t], dim=-1)
+    phi_pred = self.pinn(inputs)
 
-    # -------------------------------------------------------------
-    # 2. Perda Física da PDE (Poisson Reduzido via Autograd)
-    # -------------------------------------------------------------
-    x_col = x_colocacao.clone().detach().requires_grad_(True)
-    vgs_c = torch.full_like(x_col, Vgs_val)
-    vds_c = torch.full_like(x_col, Vds_val)
-    input_col = torch.cat([x_col / self.L, vgs_c, vds_c], dim=-1)
-
-    # Forward pass estocástico com dropout ativo
-    phi_col, _ = self.modelo(input_col)
-
-    # dphi/dx
+    # Gradientes de Poisson via Autograd
     dphi_dx = torch.autograd.grad(
-        phi_col,
-        x_col,
-        grad_outputs=torch.ones_like(phi_col),
+        phi_pred,
+        x_real,
+        grad_outputs=torch.ones_like(phi_pred),
         create_graph=True,
         retain_graph=True,
     )[0]
 
-    # d²phi/dx²
     d2phi_dx2 = torch.autograd.grad(
         dphi_dx,
-        x_col,
+        x_real,
         grad_outputs=torch.ones_like(dphi_dx),
         create_graph=True,
         retain_graph=True,
     )[0]
 
+    # Carga quântica acoplada via NEGF
+    U_quântico = -phi_pred.detach().squeeze(-1).to(torch.float64)
+    n_1d, _, _ = self.negf.resolver_transporte(U_quântico, Vds_val, self.E_grid)
+    n_3d = self.geom.densidade_1d_para_3d(n_1d).unsqueeze(-1).to(torch.float32)
+
     # Resíduo da Equação de Poisson Reduzida
-    rho = self.Q_E * (N_dop_colocacao - n_eletrons_3d)
+    rho = ConstantesFisicas.Q_E * (self.N_dop.unsqueeze(-1) - n_3d)
     res_poisson = (
         d2phi_dx2
-        - ((phi_col - Vgs_val) / self.lambda_sq)
-        + (rho / self.EPS_SI)
+        - ((phi_pred - Vgs_val) / (self.geom.lambda_g**2))
+        + (rho / ConstantesFisicas.EPS_SI)
     )
-    loss_pde = torch.mean(res_poisson**2) * 1e-18  # Normalização dimensional
+    loss_pde = torch.mean(res_poisson**2) * 1e-18
 
-    # -------------------------------------------------------------
-    # 3. Perda Total e Retropropagação
-    # -------------------------------------------------------------
-    loss_total = 20.0 * loss_dados + loss_pde
+    # Condições de Contorno de Dirichlet
+    loss_bc_source = (phi_pred[0, 0] - 0.0) ** 2
+    loss_bc_drain = (phi_pred[-1, 0] - Vds_val) ** 2
+    loss_bc = loss_bc_source + loss_bc_drain
+
+    loss_total = loss_pde + 25.0 * loss_bc
     loss_total.backward()
     self.opt.step()
 
     return {
         "loss_total": loss_total.item(),
-        "loss_dados": loss_dados.item(),
         "loss_pde": loss_pde.item(),
+        "loss_bc": loss_bc.item(),
     }
 
 
 # =============================================================================
-# 4. EXECUÇÃO COMPLETA, QUANTIFICAÇÃO E VISUALIZAÇÃO
+# 6. EXECUÇÃO, PROPAGAÇÃO DE INCERTEZA E VISUALIZAÇÃO CIENTÍFICA
 # =============================================================================
 
 if __name__ == "__main__":
@@ -282,161 +488,173 @@ if __name__ == "__main__":
   dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
   print("=" * 80)
-  print(" BAYESIAN PINN: QUANTIFICAÇÃO DE INCERTEZA EM DISPOSITIVOS NANOELETRÔNICOS")
+  print(
+      " BAYESIAN PINN & QUANTUM TRANSPORT: PROPAGAÇÃO DE INCERTEZA NEGF/LANDAUER"
+  )
   print("=" * 80)
 
-  # Parâmetros Físicos
-  L_canal = 15.0e-9  # 15 nm
-  N_grid = 50
-  x_fisico = torch.linspace(0, L_canal, N_grid, device=dispositivo).unsqueeze(-1)
-
-  Vgs_teste = 0.50  # V
-  Vds_teste = 0.30  # V
-
-  # 1. Geração de Dados Sintéticos Ruidosos (Contornos + Sensores Esparsos)
-  x_obs = torch.tensor(
-      [[0.0], [2.0e-9], [7.5e-9], [13.0e-9], [15.0e-9]],
-      device=dispositivo,
-      dtype=torch.float32,
+  # Configuração do Sistema Físico
+  geom = GeometriaDispositivo(
+      L_canal=15.0e-9, W_largura=5.0e-9, T_corpo=3.0e-9, lambda_gate=2.2e-9
   )
+  N_grid = 45
+  dx = geom.L / (N_grid - 1)
 
-  # Potencial "verdadeiro" de referência + Ruído Heterocedástico
-  phi_verdadeiro = (
-      (Vds_teste * (x_obs / L_canal))
-      + 0.15 * torch.sin(np.pi * x_obs / L_canal)
-  ).to(torch.float32)
+  # Perfil de Dopagem N+/i/N+
+  N_dop_3d = torch.zeros(N_grid, dtype=torch.float64, device=dispositivo)
+  n_ct = int(0.20 * N_grid)
+  N_dop_3d[:n_ct] = 1e26
+  N_dop_3d[-n_ct:] = 1e26
+  N_dop_3d[n_ct:-n_ct] = 1e21
 
-  # Adiciona ruído com desvio padrão sigma = 15 mV
-  ruido_medicao = torch.randn_like(x_obs) * 0.015
-  phi_obs_ruidoso = phi_verdadeiro + ruido_medicao
-
-  # Perfis de Carga para o Resíduo de Poisson
-  N_dop = torch.full((N_grid, 1), 1e21, device=dispositivo, dtype=torch.float32)
-  N_dop[:10] = 1e26
-  N_dop[-10:] = 1e26
-  n_eletrons = torch.full((N_grid, 1), 5e23, device=dispositivo, dtype=torch.float32)
-
-  # 2. Inicialização e Treinamento da PINN Bayesiana
-  rede_bayesiana = MCDropoutPINN(
-      in_dim=3,
-      hidden_dim=64,
-      num_layers=4,
-      p_dropout=0.10,
-      peso_decay_l2=1e-5,
+  # Grid de Energia e Solvers
+  E_grid = torch.linspace(
+      -0.4, 1.4, 300, dtype=torch.float64, device=dispositivo
+  )
+  negf_solver = TightBindingNEGF1D(
+      N_sites=N_grid, dx=dx, m_eff=0.20, E_F=0.0, T=300.0, device=dispositivo
+  )
+  bayesian_pinn = BayesianPINN(
+      in_dim=3, hidden_dim=48, num_layers=4, p_dropout=0.08
   ).to(dispositivo)
 
   treinador = TreinadorBayesianPINN(
-      rede_bayesiana, L_canal=L_canal, lambda_g=2.2e-9, lr=2e-3
+      bayesian_pinn,
+      negf_solver,
+      geom,
+      N_dop_3d.to(torch.float32),
+      E_grid,
+      lr=2e-3,
+      peso_decay=1e-5,
   )
 
-  print("\n>>> Treinando PINN com Amostragem Estocástica de Dropout...")
-  for epoca in range(1, 401):
-    metricas = treinador.passo_treinamento(
-        x_colocacao=x_fisico,
-        Vgs_val=Vgs_teste,
-        Vds_val=Vds_teste,
-        x_dados=x_obs,
-        phi_dados_ruidosos=phi_obs_ruidoso,
-        N_dop_colocacao=N_dop,
-        n_eletrons_3d=n_eletrons,
-    )
-    if epoca % 100 == 0 or epoca == 1:
+  # 1. Treinamento da Bayesian PINN
+  print("\n>>> [1/3] Treinando Bayesian PINN com Regularização de Monte Carlo...")
+  Vgs_op, Vds_op = 0.50, 0.35
+  for ep in range(1, 151):
+    m = treinador.passo_treinamento(Vgs_op, Vds_op)
+    if ep % 50 == 0 or ep == 1:
       print(
-          f"  Época {epoca:03d} | Perda Total: {metricas['loss_total']:.5e} |"
-          f" NLL Dados: {metricas['loss_dados']:.5e} | PDE:"
-          f" {metricas['loss_pde']:.5e}"
+          f"  Época {ep:03d} | Loss Total: {m['loss_total']:.5e} | PDE:"
+          f" {m['loss_pde']:.5e} | BC: {m['loss_bc']:.5e}"
       )
 
-  # 3. Inferência Bayesiana via Monte Carlo Dropout
-  print("\n>>> Executando Motor de Incerteza (150 Amostras de Monte Carlo)...")
-  motor_uq = MotorIncertezaBayesiana(rede_bayesiana)
+  # 2. Propagação Quântica de Incerteza no Ponto de Operação
+  print("\n>>> [2/3] Propagando Amostras Estocásticas: phi^(k) -> NEGF -> I_D^(k)...")
+  propagador_uq = PropagadorIncertezaQuantica(
+      bayesian_pinn, negf_solver, geom, E_grid
+  )
+  res_ponto = propagador_uq.avaliar_ponto_operacao(
+      Vgs_op, Vds_op, n_amostras_mc=50
+  )
 
-  vgs_grid = torch.full((N_grid, 1), Vgs_teste, device=dispositivo)
-  vds_grid = torch.full((N_grid, 1), Vds_teste, device=dispositivo)
-  input_inferencia = torch.cat([x_fisico / L_canal, vgs_grid, vds_grid], dim=-1)
+  print(
+      f"  Corrente Média E[I_D]:   {res_ponto['I_media'] * 1e6:.4f} µA"
+  )
+  print(
+      f"  Desvio Padrão std(I_D):  {res_ponto['I_std'] * 1e6:.4f} µA"
+  )
+  print(
+      f"  Intervalo Confiança 95%: [{res_ponto['I_ic95_inf'] * 1e6:.4f} ,"
+      f" {res_ponto['I_ic95_sup'] * 1e6:.4f}] µA"
+  )
 
-  resultado_uq = motor_uq.predizer_distribuicao(input_inferencia, n_amostras=150)
+  # 3. Varredura da Curva Id-Vg com Quantificação de Incerteza Completa
+  print("\n>>> [3/3] Calculando Curva Id-Vg com Bandas de Incerteza Bayesianas...")
+  vgs_sweep = np.linspace(-0.1, 0.6, 8)
+  res_id_vg_uq = propagador_uq.varrer_curva_id_vg_com_incerteza(
+      vgs_sweep, Vds_fixo=Vds_op, n_amostras_mc=30
+  )
 
-  # Conversão para NumPy para Plotting
-  x_nm = (x_fisico.cpu().numpy() * 1e9).squeeze()
-  x_obs_nm = (x_obs.cpu().numpy() * 1e9).squeeze()
-  y_obs = phi_obs_ruidoso.cpu().numpy().squeeze()
+  # 4. Geração do Painel Científico com Incerteza Propagada
+  x_nm = np.linspace(0, geom.L * 1e9, N_grid)
+  E_ev = E_grid.cpu().numpy()
 
-  media_pred = resultado_uq["media"].cpu().numpy().squeeze()
-  std_epi = resultado_uq["std_epistemica"].cpu().numpy().squeeze()
-  std_ale = resultado_uq["std_aleatoria"].cpu().numpy().squeeze()
-  std_tot = resultado_uq["std_total"].cpu().numpy().squeeze()
-  ic_inf = resultado_uq["ic_95_inf"].cpu().numpy().squeeze()
-  ic_sup = resultado_uq["ic_95_sup"].cpu().numpy().squeeze()
+  fig, axs = plt.subplots(2, 2, figsize=(14, 10))
 
-  # 4. Visualização Científica dos Resultados de Incerteza
-  fig, axs = plt.subplots(1, 2, figsize=(14, 5))
-
-  # Painel 1: Predição com Faixas de Incerteza (Intervalo de Confiança 95%)
-  axs[0].plot(
+  # Painel A: Potencial Eletrostático com Incerteza Posterior (MC Dropout)
+  axs[0, 0].plot(
       x_nm,
-      media_pred,
+      res_ponto["phi_media"],
       "b-",
       linewidth=2.2,
-      label=r"Média Preditiva $\mu(x)$",
+      label=r"Média Preditiva $\mu_\phi(x)$",
   )
-  axs[0].fill_between(
+  axs[0, 0].fill_between(
       x_nm,
-      ic_inf,
-      ic_sup,
+      res_ponto["phi_ic95_inf"],
+      res_ponto["phi_ic95_sup"],
       color="blue",
-      alpha=0.20,
-      label=r"Incerteza Total (IC 95%: $\pm 1.96\sigma_{tot}$)",
+      alpha=0.25,
+      label=r"IC 95% Posterior ($\pm 1.96\sigma_\phi$)",
   )
-  axs[0].fill_between(
-      x_nm,
-      media_pred - std_epi,
-      media_pred + std_epi,
-      color="orange",
-      alpha=0.35,
-      label=r"Incerteza Epistêmica ($\pm 1\sigma_{epi}$)",
-  )
-  axs[0].scatter(
-      x_obs_nm,
-      y_obs,
-      color="red",
-      s=45,
-      zorder=5,
-      label="Observações Ruidosas",
-  )
-  axs[0].set_title("Potencial Eletrostático com Incerteza Calibrada")
-  axs[0].set_xlabel("Posição no Canal x (nm)")
-  axs[0].set_ylabel("Potencial $\phi(x)$ (V)")
-  axs[0].grid(True, linestyle="--", alpha=0.6)
-  axs[0].legend(loc="upper left")
+  axs[0, 0].set_title(f"Potencial Eletrostático com UQ (Vgs={Vgs_op}V, Vds={Vds_op}V)")
+  axs[0, 0].set_xlabel("Posição no Canal x (nm)")
+  axs[0, 0].set_ylabel("Potencial $\phi(x)$ (V)")
+  axs[0, 0].grid(True, linestyle="--", alpha=0.6)
+  axs[0, 0].legend()
 
-  # Painel 2: Decomposição das Incertezas (Epistêmica vs Aleatória)
-  axs[1].plot(
-      x_nm,
-      std_epi * 1e3,
-      "r-",
+  # Painel B: Espectro de Transmissão Quântica com Incerteza Propagada
+  axs[0, 1].plot(
+      E_ev,
+      res_ponto["T_media"],
+      "m-",
       linewidth=2.0,
-      label=r"Incerteza Epistêmica $\sigma_{epi}$ (Modelo)",
+      label=r"Transmissão Média $\mu_T(E)$",
   )
-  axs[1].plot(
-      x_nm,
-      std_ale * 1e3,
-      "g--",
+  axs[0, 1].fill_between(
+      E_ev,
+      np.maximum(res_ponto["T_media"] - 1.96 * res_ponto["T_std"], 0.0),
+      res_ponto["T_media"] + 1.96 * res_ponto["T_std"],
+      color="purple",
+      alpha=0.25,
+      label=r"Incerteza Propagada em $T(E)$ (IC 95%)",
+  )
+  axs[0, 1].set_title("Transmissão Quântica $T(E)$ com UQ Propagada")
+  axs[0, 1].set_xlabel("Energia $E$ (eV)")
+  axs[0, 1].set_ylabel("Transmissão $T(E)$")
+  axs[0, 1].grid(True, linestyle="--", alpha=0.6)
+  axs[0, 1].legend()
+
+  # Painel C: Curva de Transferência Id-Vg com Bandas de Confiança Bayesianas
+  axs[1, 0].semilogy(
+      res_id_vg_uq["vgs"],
+      res_id_vg_uq["I_media"] * 1e6,
+      "ro-",
       linewidth=2.0,
-      label=r"Incerteza Aleatória $\sigma_{ale}$ (Ruído de Medição)",
+      label=r"Corrente Média $E[I_{DS}]$",
   )
-  axs[1].plot(
-      x_nm,
-      std_tot * 1e3,
-      "k-.",
-      linewidth=2.2,
-      label=r"Incerteza Total $\sigma_{tot}$",
+  axs[1, 0].fill_between(
+      res_id_vg_uq["vgs"],
+      np.maximum(res_id_vg_uq["I_ic_inf"] * 1e6, 1e-12),
+      res_id_vg_uq["I_ic_sup"] * 1e6,
+      color="red",
+      alpha=0.25,
+      label=r"Banda de Incerteza Bayeasian (IC 95%)",
   )
-  axs[1].set_title("Decomposição Espectral de Incertezas (mV)")
-  axs[1].set_xlabel("Posição no Canal x (nm)")
-  axs[1].set_ylabel("Desvio Padrão (mV)")
-  axs[1].grid(True, linestyle="--", alpha=0.6)
-  axs[1].legend()
+  axs[1, 0].set_title(
+      f"Curva de Transferência $I_D(V_{{GS}})$ com UQ (Vds = {Vds_op} V)"
+  )
+  axs[1, 0].set_xlabel("Tensão de Porta $V_{GS}$ (V)")
+  axs[1, 0].set_ylabel("Corrente de Dreno $I_{DS}$ (µA)")
+  axs[1, 0].grid(True, which="both", linestyle="--", alpha=0.6)
+  axs[1, 0].legend()
+
+  # Painel D: Coeficiente de Variação Relativa da Corrente (sigma_I / mu_I)
+  cv_corrente = (res_id_vg_uq["I_std"] / res_id_vg_uq["I_media"]) * 100.0
+  axs[1, 1].plot(
+      res_id_vg_uq["vgs"],
+      cv_corrente,
+      "k-s",
+      linewidth=2.0,
+      markersize=6,
+      label="Incerteza Relativa da Corrente (%)",
+  )
+  axs[1, 1].set_title(r"Incerteza Relativa $CV = \sigma_I / \mu_I$ vs $V_{GS}$")
+  axs[1, 1].set_xlabel("Tensão de Porta $V_{GS}$ (V)")
+  axs[1, 1].set_ylabel("Incerteza Relativa (%)")
+  axs[1, 1].grid(True, linestyle="--", alpha=0.6)
+  axs[1, 1].legend()
 
   plt.tight_layout()
   plt.show()
