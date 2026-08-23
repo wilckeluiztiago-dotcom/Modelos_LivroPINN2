@@ -16,7 +16,7 @@ A metodologia de PINNs, originalmente desenvolvida para EDPs financeiras (Black-
 - Continuidade / Drift-Diffusion com correções quânticas
 - Transporte balístico / NEGF simplificado via densidades de estados
 
-O projeto contém **mais de 30 módulos complexos** organizados em classes Python, amostragem Latin Hypercube, otimização híbrida Adam + L-BFGS, extração automática de “Gregas” (sensibilidades) via Autograd, e validação contra parâmetros reais da literatura de 2 nm node.
+O projeto contém **mais de 30 módulos complexos** organizados em classes Python, com variáveis em português, amostragem Latin Hypercube, otimização híbrida Adam + L-BFGS, extração automática de “Gregas” (sensibilidades) via Autograd, e validação contra parâmetros reais da literatura de 2 nm node.
 
 ## Equações Governantes (Renderizadas para GitHub)
 
@@ -66,29 +66,47 @@ $$
 
 com $N_{\text{S/D}} \approx 2 \times 10^{20}\,\text{cm}^{-3}$ e $N_{\text{canal}} \approx 1 \times 10^{15} - 2 \times 10^{17}\,\text{cm}^{-3}$ (valores típicos do nó N2).
 
-## Estrutura do Projeto (30+ Módulos)
+## Estrutura do Projeto (31 módulos completos)
 
 ```text
 NanoTransistor_PINN_2nm_LuizTiagoWilcke/
 ├── README.md
 ├── requirements.txt
 ├── src/
-│   ├── geometria_dispositivo.py              # Definição GAA / Double-Gate 2 nm
-│   ├── parametros_materiais_si.py             # Si, ε, m*, Eg, μ
-│   ├── perfil_dopagem_fosforo.py              # N_D(x) gaussiano / erfc
-│   ├── equacao_poisson.py                     # Residual Poisson
-│   ├── equacao_schrodinger.py                 # Residual Schrödinger + autovalores
-│   ├── arquitetura_pinn_poderosa.py           # MLP residual + Fourier features
-│   ├── main_treinamento.py                    # Script principal de treinamento
-│   ├── modulo_06.py ... modulo_30.py          # 25 módulos avançados de extensão
-│   │     (continuidade, BC, LHS, otimização híbrida, Gregas, transporte
-│   │      balístico, NEGF, self-consistent, calibração inversa, RDF,
-│   │      temperatura, mobilidade, SRH/Auger, tunneling, GAA 3D, FNO,
-│   │      DeepONet, MFG, risco sistêmico, rugosidade, HJB layout,
-│   │      Bayesian PINN, solver de produção)
-├── data/                                      # Parâmetros reais N2, doping P
-├── results/                                   # Id-Vg, potencial, densidade, loss
-├── figures/                                   # Gráficos gerados
+│   ├── geometria_dispositivo.py          # GAA / Double-Gate 2 nm
+│   ├── parametros_materiais_si.py         # Si, ε, m*, Eg, μ, constantes
+│   ├── perfil_dopagem_fosforo.py          # N_D(x) gaussiano treinável
+│   ├── equacao_poisson.py                 # Residual Poisson normalizado
+│   ├── equacao_schrodinger.py             # Residual Schrödinger efetiva-massa
+│   ├── continuidade_drift_diffusion.py    # J_n + continuidade estacionária
+│   ├── condicoes_contorno.py              # Dirichlet fonte/dreno
+│   ├── amostragem_lhs.py                  # Latin Hypercube Sampling
+│   ├── arquitetura_pinn_poderosa.py       # Residual MLP + Fourier Features
+│   ├── funcao_perda_composta.py           # Loss multi-física
+│   ├── otimizacao_hibrida.py              # Adam → L-BFGS
+│   ├── autograd_gregas.py                 # Δ, Γ via Autograd
+│   ├── transporte_balistico.py            # Landauer / Top-of-Barrier
+│   ├── negf_simplificado.py               # Densidade espectral Lorentziana
+│   ├── self_consistent_loop.py            # Loop Poisson auto-consistente
+│   ├── calibracao_inversa.py              # Inverse doping / work-function
+│   ├── ruido_rdf.py                       # Random Dopant Fluctuation
+│   ├── temperatura_efeito.py              # Dependência T (μ, Eg, VT)
+│   ├── mobilidade_campo_alto.py           # Caughey-Thomas / Lombardi
+│   ├── recombinacao_srh_auger.py          # SRH + Auger
+│   ├── barreira_tunelamento.py            # WKB / BTBT
+│   ├── multi_gate_gaa.py                  # Extensão GAA multi-folha
+│   ├── fourier_neural_operator.py         # FNO 1D para I-V
+│   ├── deeponet_dispositivo.py            # DeepONet bias → potencial
+│   ├── mfg_contagio.py                    # Mean-Field Games de variação
+│   ├── risco_sistemico_chip.py            # Contágio de falha em chip
+│   ├── rough_interface.py                 # Rugosidade fBm (Hurst)
+│   ├── hjb_otimizacao_layout.py           # HJB controle de dopagem
+│   ├── bayesian_pinn.py                   # MC-Dropout incerteza
+│   ├── producao_solver_modular.py         # Interface de alto nível
+│   └── main_treinamento.py                # Script principal
+├── data/
+├── results/
+├── figures/
 ├── docs/
 │   └── artigo_cientifico.md
 └── notebooks/
