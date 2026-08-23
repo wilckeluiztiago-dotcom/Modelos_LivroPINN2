@@ -6,7 +6,7 @@
 
 ## Resumo
 
-Apresentamos a primeira adaptação sistemática do paradigma de Physics-Informed Neural Networks (PINNs), originalmente consolidado para equações diferenciais parciais financeiras (Black-Scholes, Heston, HJB, Fokker-Planck), à física de dispositivos nanoeletrônicos. Modelamos um nanotransistor de silício com canal de 2 nm (tecnologia N2 Gate-All-Around / Nanosheet) dopado com fósforo, resolvendo de forma mesh-free e auto-consistente as equações de Poisson e Schrödinger com perfil de dopagem realista. A arquitetura residual com Fourier features, amostragem Latin Hypercube e otimização híbrida Adam + L-BFGS permitem obter potencial eletrostático, densidade de portadores e características I–V com erro residual físico inferior a 10⁻⁵. O framework modular (30+ módulos) é liberado publicamente e serve como ponte metodológica entre quantificação financeira e física de semicondutores.
+Apresentamos a primeira adaptação sistemática do paradigma de Physics-Informed Neural Networks (PINNs), originalmente consolidado para equações diferenciais parciais financeiras (Black-Scholes, Heston, HJB, Fokker-Planck), à física de dispositivos nanoeletrônicos. Modelamos um nanotransistor de silício com canal de 2 nm (tecnologia N2 Gate-All-Around / Nanosheet) dopado com fósforo, resolvendo de forma mesh-free e auto-consistente as equações de Poisson e Schrödinger com perfil de dopagem realista. A arquitetura residual com Fourier features, amostragem Latin Hypercube e otimização híbrida Adam + L-BFGS permitem obter potencial eletrostático, densidade de portadores e características I–V com erro residual físico inferior a $10^{-5}$. O framework modular (30+ módulos) é liberado publicamente e serve como ponte metodológica entre quantificação financeira e física de semicondutores.
 
 **Palavras-chave:** PINNs, nanotransistor, 2 nm, silício, fósforo, Poisson-Schrödinger, deep learning científico.
 
@@ -22,36 +22,36 @@ Neste trabalho transferimos integralmente a metodologia do Volume II do livro *R
 
 ### 2.1 Geometria e Materiais
 
-Consideramos um canal de silício de espessura \( t_{\mathrm{Si}} = 2\,\mathrm{nm} \), comprimento de porta \( L_g = 14\,\mathrm{nm} \) (típico do nó N2 com contacted gate pitch de 45 nm). Dopagem de fósforo:
+Consideramos um canal de silício de espessura $t_{\mathrm{Si}} = 2\,\mathrm{nm}$, comprimento de porta $L_g = 14\,\mathrm{nm}$ (típico do nó N2 com contacted gate pitch de 45 nm). Dopagem de fósforo:
 
-- Fonte/Dreno: \( N_D = 2\times 10^{20}\,\mathrm{cm}^{-3} \)
-- Canal: \( N_D = 1\times 10^{15}\,\mathrm{cm}^{-3} \)
+- Fonte/Dreno: $N_D = 2\times 10^{20}\,\mathrm{cm}^{-3}$
+- Canal: $N_D = 1\times 10^{15}\,\mathrm{cm}^{-3}$
 
 ### 2.2 Sistema de Equações
 
 O sistema auto-consistente Poisson-Schrödinger é:
 
-\[
-\nabla\cdot(\varepsilon\nabla\phi) = -q\bigl(p-n+N_D^+-N_A^-\bigr)
-\]
+$$
+\nabla\cdot(\varepsilon\nabla\phi) = -q\bigl(p - n + N_D^+ - N_A^-\bigr)
+$$
 
-\[
-\Bigl(-\frac{\hbar^2}{2m^*}\nabla^2 + V(\phi)\Bigr)\psi_i = E_i\psi_i
-\]
+$$
+\left(-\frac{\hbar^{2}}{2m^{*}}\nabla^{2} + V(\phi)\right)\psi_{i} = E_{i}\,\psi_{i}
+$$
 
-\[
-n = \sum_i|\psi_i|^2 f_{\mathrm{FD}}(E_i;E_F)
-\]
+$$
+n = \sum_{i}|\psi_{i}|^{2}\, f_{\mathrm{FD}}(E_{i};E_{F})
+$$
 
 com condições de contorno abertas ou Dirichlet nas regiões de contato.
 
 ## 3. Formulação PINN
 
-A rede neural \( \mathcal{N}_\theta(\mathbf{x}) \) aproxima simultaneamente \(\phi\), \(n\) e \(\psi\). A função de perda composta é:
+A rede neural $\mathcal{N}_{\theta}(\mathbf{x})$ aproxima simultaneamente $\phi$, $n$ e $\psi$. A função de perda composta é:
 
-\[
-\mathcal{L}(\theta) = \lambda_P\mathcal{L}_{\mathrm{Poisson}} + \lambda_S\mathcal{L}_{\mathrm{Schrödinger}} + \lambda_{\mathrm{BC}}\mathcal{L}_{\mathrm{BC}} + \lambda_{\mathrm{dados}}\mathcal{L}_{\mathrm{dados}}
-\]
+$$
+\mathcal{L}(\theta) = \lambda_{P}\,\mathcal{L}_{\mathrm{Poisson}} + \lambda_{S}\,\mathcal{L}_{\mathrm{Schrödinger}} + \lambda_{\mathrm{BC}}\,\mathcal{L}_{\mathrm{BC}} + \lambda_{\mathrm{dados}}\,\mathcal{L}_{\mathrm{dados}}
+$$
 
 exatamente análoga à perda multi-termo usada para Black-Scholes + condições de contorno + dados de mercado no livro original.
 
@@ -74,7 +74,7 @@ O repositório contém 30 módulos complexos cobrindo:
 
 Após treinamento (2000 épocas Adam + 300 L-BFGS) observamos:
 
-- Residual de Poisson \( < 10^{-5} \)
+- Residual de Poisson $< 10^{-5}$
 - Potencial eletrostático suave e consistente com perfil de dopagem gaussiano de fósforo
 - Densidade eletrônica concentrada no centro do canal de 2 nm (confinamento quântico)
 - Curva de aprendizado monotônica decrescente
@@ -100,7 +100,7 @@ Este trabalho estabelece a ponte definitiva entre a engenharia financeira neural
 
 1. Wilcke, L. T. – *Redes Neurais Informadas pela Física – Volume II* (2025/2026).  
 2. Raissi et al. – Physics-informed neural networks (2019).  
-3. Literatura de dispositivo N2 (GAA nanosheet, doping P 2e20 cm⁻³).  
+3. Literatura de dispositivo N2 (GAA nanosheet, doping P $2\times 10^{20}\,\mathrm{cm}^{-3}$).  
 4. DDNet e trabalhos recentes de PINNs para drift-diffusion em semicondutores (2025–2026).
 
 ---
