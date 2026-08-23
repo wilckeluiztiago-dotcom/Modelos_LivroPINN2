@@ -16,7 +16,7 @@ A metodologia de PINNs, originalmente desenvolvida para EDPs financeiras (Black-
 - Continuidade / Drift-Diffusion com correções quânticas
 - Transporte balístico / NEGF simplificado via densidades de estados
 
-O projeto contém **mais de 30 módulos complexos** organizados em classes Python, com variáveis em português, amostragem Latin Hypercube, otimização híbrida Adam + L-BFGS, extração automática de “Gregas” (sensibilidades) via Autograd, e validação contra parâmetros reais da literatura de 2 nm node.
+O projeto contém **mais de 30 módulos complexos** organizados em classes Python, amostragem Latin Hypercube, otimização híbrida Adam + L-BFGS, extração automática de “Gregas” (sensibilidades) via Autograd, e validação contra parâmetros reais da literatura de 2 nm node.
 
 ## Equações Governantes (Renderizadas para GitHub)
 
