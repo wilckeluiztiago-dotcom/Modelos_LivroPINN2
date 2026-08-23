@@ -1,4 +1,4 @@
-# Modelagem Completa de Nanotransistor de Silício de 2 nm com Dopagem de Fósforo via Redes Neurais Informadas pela Física (PINNs)
+# Framework computacional para modelagem de um nanotransistor de silício de 2 nm com Dopagem de Fósforo via Redes Neurais Informadas pela Física (PINNs)
 
 **Autor:** Luiz Tiago Wilcke  
 **Afiliação:** Bacharel em Estatística | Engenharia Financeira Neural (adaptação metodológica)  
