@@ -1,37 +1,46 @@
 """
-Módulo: Otimização Híbrida Adam → L-BFGS
+Módulo: Otimização Híbrida Adam → L-BFGS com pesos adaptativos
 Autor: Luiz Tiago Wilcke
 """
 
 import torch
-from tqdm import tqdm
 
 
-def treinar_adam(modelo, perda_fn, x_col, epochs=2000, lr=1e-3, device="cpu",
-                 perfil=None, log_every=200):
-    otimizador = torch.optim.Adam(modelo.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(otimizador, step_size=500, gamma=0.5)
+def treinar_adam(modelo, perda_fn, x_col, epochs=1500, lr=1e-3,
+                 perfil=None, log_every=150, device="cpu"):
+    otimizador = torch.optim.Adam(modelo.parameters(), lr=lr, weight_decay=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(otimizador, T_max=epochs)
     historico = []
 
     for ep in range(epochs):
         otimizador.zero_grad()
-        loss, detalhes = perda_fn(modelo, x_col, perfil=perfil)
+        loss, det = perda_fn(modelo, x_col, perfil=perfil)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(modelo.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(modelo.parameters(), 2.0)
         otimizador.step()
         scheduler.step()
         historico.append(loss.item())
+
+        # adaptação simples de pesos (a cada 300 épocas)
+        if ep > 0 and ep % 300 == 0:
+            if det["bc"] > 10 * det["poisson"]:
+                perda_fn.lambda_bc *= 0.8
+            elif det["poisson"] > 5 * det["bc"]:
+                perda_fn.lambda_p *= 0.9
+
         if ep % log_every == 0:
-            print(f"Adam Epoch {ep:5d} | Loss: {loss.item():.3e} | "
-                  f"P: {detalhes['poisson']:.2e} C: {detalhes['continuidade']:.2e} BC: {detalhes['bc']:.2e}")
+            print(f"Adam {ep:5d} | Loss {loss.item():.3e} | "
+                  f"P {det['poisson']:.2e} C {det['continuidade']:.2e} BC {det['bc']:.2e}")
     return historico
 
 
-def treinar_lbfgs(modelo, perda_fn, x_col, max_iter=50, perfil=None):
+def treinar_lbfgs(modelo, perda_fn, x_col, max_iter=60, perfil=None):
     otimizador = torch.optim.LBFGS(
-        modelo.parameters(), lr=0.5, max_iter=20,
-        history_size=50, line_search_fn="strong_wolfe"
+        modelo.parameters(), lr=0.8, max_iter=25,
+        history_size=60, line_search_fn="strong_wolfe",
+        tolerance_grad=1e-8, tolerance_change=1e-10
     )
+    historico = []
 
     def closure():
         otimizador.zero_grad()
@@ -39,9 +48,9 @@ def treinar_lbfgs(modelo, perda_fn, x_col, max_iter=50, perfil=None):
         loss.backward()
         return loss
 
-    historico = []
-    for i in range(max(1, max_iter // 20)):
+    n_steps = max(1, max_iter // 25)
+    for i in range(n_steps):
         loss_val = otimizador.step(closure)
         historico.append(float(loss_val))
-        print(f"L-BFGS step {i} | Loss: {float(loss_val):.3e}")
+        print(f"L-BFGS {i:3d} | Loss {float(loss_val):.3e}")
     return historico

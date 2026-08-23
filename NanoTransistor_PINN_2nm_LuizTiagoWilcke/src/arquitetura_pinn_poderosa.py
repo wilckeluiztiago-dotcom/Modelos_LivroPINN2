@@ -1,5 +1,5 @@
 """
-Módulo: Arquitetura PINN Poderosa (Residual MLP + Fourier Features)
+Módulo: Arquitetura PINN Poderosa – Residual + Fourier Features + Softplus
 Autor: Luiz Tiago Wilcke
 """
 
@@ -9,7 +9,7 @@ import math
 
 
 class FourierFeatures(nn.Module):
-    def __init__(self, in_dim: int = 1, num_freq: int = 64, scale: float = 10.0):
+    def __init__(self, in_dim: int = 1, num_freq: int = 64, scale: float = 12.0):
         super().__init__()
         B = torch.randn(in_dim, num_freq) * scale
         self.register_buffer("B", B)
@@ -20,26 +20,29 @@ class FourierFeatures(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, dim: int, ativacao=nn.Tanh):
+    def __init__(self, dim: int):
         super().__init__()
         self.fc1 = nn.Linear(dim, dim)
         self.fc2 = nn.Linear(dim, dim)
-        self.act = ativacao()
+        self.act = nn.Tanh()
+        # residual scaling para estabilidade
+        self.alpha = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         out = self.act(self.fc1(x))
         out = self.fc2(out)
-        return self.act(out + residual)
+        return self.act(residual + self.alpha * out)
 
 
 class PINNPoderosa(nn.Module):
     """
-    Rede multi-saída para (φ, n, ψ, ...) 
-    Entrada: coordenadas normalizadas (x, y, Vgs, Vds, ...)
+    Rede multi-saída:
+      saída[:,0] → φ* (potencial normalizado)
+      saída[:,1] → n* (densidade normalizada, depois softplus)
     """
-    def __init__(self, in_dim: int = 2, out_dim: int = 3, hidden: int = 256,
-                 n_blocks: int = 6, fourier: bool = True, num_freq: int = 64):
+    def __init__(self, in_dim: int = 1, out_dim: int = 2, hidden: int = 192,
+                 n_blocks: int = 5, fourier: bool = True, num_freq: int = 48):
         super().__init__()
         self.fourier = fourier
         if fourier:
@@ -48,34 +51,22 @@ class PINNPoderosa(nn.Module):
         else:
             first_dim = in_dim
 
-        camadas = [nn.Linear(first_dim, hidden), nn.Tanh()]
+        layers = [nn.Linear(first_dim, hidden), nn.Tanh()]
         for _ in range(n_blocks):
-            camadas.append(ResidualBlock(hidden))
-        camadas.append(nn.Linear(hidden, out_dim))
-        self.net = nn.Sequential(*camadas)
-
+            layers.append(ResidualBlock(hidden))
+        layers.append(nn.Linear(hidden, out_dim))
+        self.net = nn.Sequential(*layers)
         self._inicializar()
 
     def _inicializar(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
+                nn.init.xavier_normal_(m.weight, gain=0.8)
                 nn.init.zeros_(m.bias)
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        if self.fourier:
-            x = self.ff(coords)
-        else:
-            x = coords
+        x = self.ff(coords) if self.fourier else coords
         return self.net(x)
 
     def num_parametros(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-
-if __name__ == "__main__":
-    modelo = PINNPoderosa(in_dim=2, out_dim=3)
-    x = torch.randn(100, 2)
-    y = modelo(x)
-    print(f"Saída shape: {y.shape}")
-    print(f"Parâmetros treináveis: {modelo.num_parametros():,}")
