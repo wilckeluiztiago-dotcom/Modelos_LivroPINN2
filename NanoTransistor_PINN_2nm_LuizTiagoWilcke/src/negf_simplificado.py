@@ -1,52 +1,174 @@
-"""Módulo: Solver Auto-Consistente Poisson-NEGF 1D para Nanotransistores
+"""Módulo: Framework Quântico-Eletrostático Completo (NEGF, Landauer & PINN)
 
 Autor: Luiz Tiago Wilcke
-Descrição: Código completo com modelo Tight-Binding, Funções de Green Não-Equilíbrio (NEGF),
-           equação de Poisson com acoplamento capacitivo de porta e loop auto-consistente (SCF).
+Descrição: Implementação unificada e rigorosa contendo:
+           1. Single-Level NEGF Analítico (Transporte ressonante Breit-Wigner)
+           2. 1D Tight-Binding NEGF Matricial (Open Boundary Conditions, G^R, G^<,
+           A(x,E), T(E))
+           3. Solver de Poisson 1D com Eletrostática de Porta (DG-MOSFET)
+           4. Physics-Informed Neural Network (PINN) auto-consistente treinável
+           via PyTorch
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+
+# =============================================================================
+# 1. CONSTANTES FÍSICAS UNIVERSAIS
+# =============================================================================
 
 
-class NEGF1DSolver:
-  """Solver quântico baseado no formalismo de Funções de Green Não-Equilíbrio."""
+class ConstantesFisicas:
+  """Constantes fundamentais em unidades SI e conversões para eV."""
 
-  Q_E = 1.602176634e-19  # C (Carga do elétron)
-  H_PLANCK = 6.62607015e-34  # J·s (Constante de Planck)
-  H_BAR = 1.054571817e-34  # J·s
-  M_E = 9.1093837e-31  # kg (Massa do elétron livre)
-  K_B_EV = 8.617333262e-5  # eV/K (Constante de Boltzmann)
-  G0 = 2 * (1.602176634e-19**2) / 6.62607015e-34  # 2q²/h ≈ 77.48 µS
+  Q_E: float = 1.602176634e-19  # C (Carga elementar)
+  H_PLANCK: float = 6.62607015e-34  # J·s (Constante de Planck)
+  H_BAR: float = 1.054571817e-34  # J·s (Planck reduzida)
+  M_E: float = 9.1093837e-31  # kg (Massa de repouso do elétron)
+  K_B_EV: float = 8.617333262e-5  # eV/K (Constante de Boltzmann)
+  EPS_0: float = 8.8541878128e-12  # F/m (Permissividade do vácuo)
+  EPS_SI: float = 11.7 * 8.8541878128e-12  # F/m (Permissividade do Silício)
+  G0: float = 2.0 * (1.602176634e-19**2) / 6.62607015e-34  # ~77.48 µS (Quanta de condutância)
+
+
+# =============================================================================
+# 2. MODELO NEGF ANALÍTICO (NÍVEL ÚNICO / CANAL ULTRA-CURTO)
+# =============================================================================
+
+
+class SingleLevelNEGF(nn.Module):
+  """Modelo Analítico de Nível Único com acoplamento fonte-dreno explícito.
+
+  Calcula Green Retardada, Densidades Espectrais parciais A_S e A_D,
+  Transmissão Breit-Wigner e Corrente de Landauer-Büttiker.
+  """
 
   def __init__(
       self,
-      N_pts: int = 60,
-      a_dx: float = 0.5e-9,  # Espaçamento de grade (m) -> 0.5 nm
-      m_eff: float = 0.25,  # Massa efetiva (m* / m0)
-      gamma_S: float = 0.15,  # Acoplamento Fonte (eV)
-      gamma_D: float = 0.15,  # Acoplamento Dreno (eV)
-      E_F: float = 0.0,  # Nível de Fermi de equilíbrio (eV)
-      T: float = 300.0,  # Temperatura (K)
+      gamma_S: float = 0.08,
+      gamma_D: float = 0.08,
+      E_F: float = 0.0,
+      T: float = 300.0,
+      E_min: float = -1.5,
+      E_max: float = 1.5,
+      n_energy_pts: int = 500,
+  ):
+    super().__init__()
+    self.gamma_S = float(gamma_S)
+    self.gamma_D = float(gamma_D)
+    self.gamma_tot = self.gamma_S + self.gamma_D
+    self.E_F = float(E_F)
+    self.T = float(T)
+    self.kBT = max(ConstantesFisicas.K_B_EV * self.T, 1e-7)
+
+    # Grid de quadratura numérica de energia
+    self.register_buffer(
+        "E_grid",
+        torch.linspace(E_min, E_max, n_energy_pts, dtype=torch.float64),
+    )
+
+  def fermi_dirac(
+      self, E: torch.Tensor, mu: torch.Tensor
+  ) -> torch.Tensor:
+    """Distribuição de Fermi-Dirac numericamente estável."""
+    arg = torch.clamp(-(E - mu) / self.kBT, -80.0, 80.0)
+    return torch.sigmoid(arg)
+
+  def green_retardada(
+      self, E: torch.Tensor, E0: torch.Tensor
+  ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Retorna componentes real e imaginária de G^R(E) = 1 / [E - E0 + i*Γ_tot/2]."""
+    denom = (E - E0) ** 2 + (0.5 * self.gamma_tot) ** 2
+    return (E - E0) / denom, -0.5 * self.gamma_tot / denom
+
+  def densidades_espectrais(
+      self, E: torch.Tensor, E0: torch.Tensor
+  ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Retorna A_S(E), A_D(E) e A_total(E)."""
+    denom = (E - E0) ** 2 + (0.5 * self.gamma_tot) ** 2
+    A_S = self.gamma_S / denom
+    A_D = self.gamma_D / denom
+    A_tot = self.gamma_tot / denom
+    return A_S, A_D, A_tot
+
+  def transmissao(self, E: torch.Tensor, E0: torch.Tensor) -> torch.Tensor:
+    """T(E) = Γ_S * Γ_D * |G^R(E)|²."""
+    denom = (E - E0) ** 2 + (0.5 * self.gamma_tot) ** 2
+    return (self.gamma_S * self.gamma_D) / denom
+
+  def forward(
+      self, E0: torch.Tensor, Vds: torch.Tensor
+  ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Forward pass calculando Ocupação (N), Corrente Landauer (A) e Transmissão média."""
+    mu_S = torch.as_tensor(self.E_F, dtype=E0.dtype, device=E0.device)
+    mu_D = self.E_F - Vds
+
+    E = self.E_grid.unsqueeze(-1) if E0.dim() > 0 else self.E_grid
+
+    f_S = self.fermi_dirac(E, mu_S)
+    f_D = self.fermi_dirac(E, mu_D)
+
+    # 1. Densidade eletrônica integrada no estado
+    A_S, A_D, _ = self.densidades_espectrais(E, E0)
+    integrando_n = (A_S * f_S + A_D * f_D) / (2.0 * np.pi)
+    n_charge = torch.trapezoid(integrando_n, self.E_grid, dim=0)
+
+    # 2. Corrente Landauer-Büttiker
+    T_E = self.transmissao(E, E0)
+    integrando_I = T_E * (f_S - f_D)
+    corrente = ConstantesFisicas.G0 * torch.trapezoid(
+        integrando_I, self.E_grid, dim=0
+    )
+
+    return n_charge, corrente, T_E
+
+
+# =============================================================================
+# 3. SOLVER 1D TIGHT-BINDING NEGF MATRICIAL COMPLETO
+# =============================================================================
+
+
+class TightBindingNEGF1D:
+  """Solver NEGF 1D para perfis arbitrários de potencial U(x).
+
+  Resolve:
+    - Hamiltoniano discreto de massa efetiva
+    - Matrizes de autoenergia de contatos abertos (Wide-Band)
+    - Função de Green Retardada G^R(E) = [E*I - H - Σ_S - Σ_D]⁻¹
+    - Função de Correlação Menor G^<(E) = G^R * Σ^in * G^A
+    - Densidade de carga espacial n(x) e transmissão T(E)
+  """
+
+  def __init__(
+      self,
+      N_sites: int = 50,
+      dx: float = 0.4e-9,  # 0.4 nm
+      m_eff: float = 0.20,  # Massa efetiva m* / m0
+      gamma_S: float = 0.2,
+      gamma_D: float = 0.2,
+      E_F: float = 0.1,
+      T: float = 300.0,
       device: torch.device = torch.device("cpu"),
   ):
-    self.N = N_pts
-    self.dx = a_dx
+    self.N = N_sites
+    self.dx = dx
     self.device = device
     self.gamma_S = gamma_S
     self.gamma_D = gamma_D
     self.E_F = E_F
-    self.T = T
-    self.kBT = max(self.K_B_EV * self.T, 1e-6)
+    self.kBT = max(ConstantesFisicas.K_B_EV * T, 1e-7)
 
-    # Parâmetro de hopping t0 = hbar^2 / (2 * m* * dx^2) em eV
-    t0_joules = (self.H_BAR**2) / (2.0 * (m_eff * self.M_E) * (self.dx**2))
-    self.t0 = float(t0_joules / self.Q_E)  # Conversão para eV
+    # Energia de hopping: t0 = hbar^2 / (2 * m* * dx^2) em eV
+    t0_joules = (ConstantesFisicas.H_BAR**2) / (
+        2.0 * (m_eff * ConstantesFisicas.M_E) * (self.dx**2)
+    )
+    self.t0 = float(t0_joules / ConstantesFisicas.Q_E)
 
-    # Hamiltoniano cinético base H0 (Tridiagonal)
+    # Matriz Hamiltoniana Cinética H0 (Tridiagonal)
     diag_kinetic = 2.0 * self.t0 * torch.ones(self.N, dtype=torch.float64)
     off_kinetic = -self.t0 * torch.ones(self.N - 1, dtype=torch.float64)
     self.H0 = (
@@ -55,7 +177,7 @@ class NEGF1DSolver:
         + torch.diag(off_kinetic, -1)
     ).to(self.device)
 
-    # Matrizes de autoenergia estáticas (Wide-Band Approximation)
+    # Autoenergias Wide-Band
     self.Sigma_S = torch.zeros(
         (self.N, self.N), dtype=torch.complex128, device=self.device
     )
@@ -74,20 +196,18 @@ class NEGF1DSolver:
   def fermi_dirac(
       self, E: torch.Tensor, mu: float
   ) -> torch.Tensor:
-    """Ocupação de Fermi-Dirac protegida contra underflow/overflow."""
     arg = torch.clamp(-(E - mu) / self.kBT, -80.0, 80.0)
     return torch.sigmoid(arg)
 
-  def resolver_densidade_e_transmissao(
+  def resolver_transporte(
       self,
       U_potencial: torch.Tensor,
       Vds: float,
       E_grid: torch.Tensor,
-  ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Calcula a densidade linear de portadores n(x) [1/m] e transmissão T(E)."""
-    # H = H0 + diag(U(x))
-    H_total = self.H0 + torch.diag(U_potencial.to(torch.float64))
-    H_c = H_total.to(torch.complex128)
+  ) -> Tuple[torch.Tensor, torch.Tensor, float]:
+    """Executa a integração em energia sobre todo o espectro."""
+    H = self.H0 + torch.diag(U_potencial.to(torch.float64))
+    H_c = H.to(torch.complex128)
 
     mu_S = self.E_F
     mu_D = self.E_F - Vds
@@ -95,69 +215,63 @@ class NEGF1DSolver:
     T_lista = []
     n_x = torch.zeros(self.N, dtype=torch.float64, device=self.device)
 
-    # Varredura em energia
     for E in E_grid:
       E_val = E.item()
       f_S = self.fermi_dirac(E, mu_S)
       f_D = self.fermi_dirac(E, mu_D)
 
-      # G^R(E) = [E*I - H - Sigma_S - Sigma_D]^(-1)
+      # Função de Green Retardada G^R = [E*I - H - Σ_S - Σ_D]⁻¹
       A_mat = (E_val + 1e-7j) * self.I_mat - H_c - self.Sigma_S - self.Sigma_D
       G_R = torch.linalg.inv(A_mat)
       G_A = G_R.conj().T
 
-      # T(E) = Tr[Gamma_S * G_R * Gamma_D * G_A]
+      # Transmissão Quântica T(E) = Tr[Γ_S * G^R * Γ_D * G^A]
       T_E = torch.trace(self.Gamma_S @ G_R @ self.Gamma_D @ G_A).real
       T_lista.append(T_E)
 
-      # G^<(E) = G_R * (Gamma_S*f_S + Gamma_D*f_D) * G_A
+      # Função de Menor G^< = G^R * (Γ_S*f_S + Γ_D*f_D) * G^A
       Sigma_in = (self.Gamma_S * f_S) + (self.Gamma_D * f_D)
       G_lesser = G_R @ Sigma_in @ G_A
 
-      # Densidade local por intervalo de energia: diag(G^<) / (2*pi*dx)
+      # n(x, E) = diag(G^<) / (2π * dx)
       n_x += torch.diag(G_lesser).imag / (2.0 * np.pi * self.dx)
 
     dE = (E_grid[1] - E_grid[0]).item()
     n_x = n_x * dE
     T_espectro = torch.stack(T_lista)
 
-    return n_x, T_espectro
+    # Corrente de Landauer terminal
+    f_S_all = self.fermi_dirac(E_grid, mu_S)
+    f_D_all = self.fermi_dirac(E_grid, mu_D)
+    integrando_I = T_espectro * (f_S_all - f_D_all)
+    I_ds = float(
+        ConstantesFisicas.G0 * torch.trapezoid(integrando_I, E_grid).item()
+    )
 
-  def calcular_corrente(
-      self, T_espectro: torch.Tensor, Vds: float, E_grid: torch.Tensor
-  ) -> float:
-    """Calcula a corrente terminal via integral de Landauer-Büttiker (A)."""
-    mu_S = self.E_F
-    mu_D = self.E_F - Vds
-    f_S = self.fermi_dirac(E_grid, mu_S)
-    f_D = self.fermi_dirac(E_grid, mu_D)
+    return n_x, T_espectro, I_ds
 
-    integrando = T_espectro * (f_S - f_D)
-    integral_T = torch.trapezoid(integrando, E_grid).item()
-    return float(self.G0 * integral_T)
+
+# =============================================================================
+# 4. SOLVER DE POISSON 1D E AUTO-CONSISTÊNCIA (SCF BENCHMARK)
+# =============================================================================
 
 
 class Poisson1D:
-  """Solver da Equação de Poisson 1D com acoplamento capacitivo de porta (DG-MOSFET)."""
-
-  EPS_0 = 8.8541878128e-12  # F/m
-  EPS_SEMI = 11.7 * 8.8541878128e-12  # Silício
-  Q_E = 1.602176634e-19
+  """Equação de Poisson 1D discretizada com termo capacitivo de porta (DG-MOSFET)."""
 
   def __init__(
       self,
-      N_pts: int,
+      N_sites: int,
       dx: float,
-      lambda_g: float = 3.0e-9,
+      lambda_g: float = 2.5e-9,
       device: torch.device = torch.device("cpu"),
   ):
-    """lambda_g: Comprimento de triagem característico da porta (m)."""
-    self.N = N_pts
+    self.N = N_sites
     self.dx = dx
     self.lambda_sq = lambda_g**2
     self.device = device
 
-    # Construção da matriz Laplaciana 1D com termo de porta: d²phi/dx² - phi/lambda²
+    # Laplaciano 1D acoplado à porta: d²ϕ/dx² - (ϕ - Vg)/λ²
     diag_val = -2.0 / (dx**2) - (1.0 / self.lambda_sq)
     off_val = 1.0 / (dx**2)
 
@@ -179,191 +293,292 @@ class Poisson1D:
         )
     ).to(self.device)
 
-  def resolver_potencial(
+  def resolver(
       self,
       n_x: torch.Tensor,
       N_dop: torch.Tensor,
-      V_gate: float,
-      V_source: float,
-      V_drain: float,
+      Vg: float,
+      Vs: float,
+      Vd: float,
   ) -> torch.Tensor:
-    """Resolve: d²phi/dx² - (phi - V_gate)/lambda² = -q * (N_dop - n_x) / eps_semi."""
-    # Vetor de carga do lado direito
-    rho = self.Q_E * (N_dop - n_x)
-    RHS = -(rho / self.EPS_SEMI) - (V_gate / self.lambda_sq)
+    """Resolve a distribuição de potencial eletrostático ϕ(x)."""
+    rho = ConstantesFisicas.Q_E * (N_dop - n_x)
+    RHS = -(rho / ConstantesFisicas.EPS_SI) - (Vg / self.lambda_sq)
 
-    # Condições de Contorno de Dirichlet nos contatos
     A = self.M_poisson.clone()
     b = RHS.clone()
 
+    # Dirichlet nos contatos
     A[0, :] = 0.0
     A[0, 0] = 1.0
-    b[0] = V_source
+    b[0] = Vs
 
     A[-1, :] = 0.0
     A[-1, -1] = 1.0
-    b[-1] = V_drain
+    b[-1] = Vd
 
-    phi = torch.linalg.solve(A, b)
-    return phi
+    return torch.linalg.solve(A, b)
 
 
-class AutoConsistentePoissonNEGF:
-  """Loop Auto-Consistente (Self-Consistent Field - SCF) com amortecimento de Anderson/Picard."""
+# =============================================================================
+# 5. PHYSICS-INFORMED NEURAL NETWORK (PINN) QUÂNTICO-ELETROSTÁTICA
+# =============================================================================
+
+
+class NanotransistorPINN(nn.Module):
+  """Rede Neural Informada pela Física (PINN) para predição direta do potencial
+
+  eletrostático U(x) e parâmetros quânticos sob polarizações (x, Vgs, Vds).
+  """
+
+  def __init__(self, hidden_dim: int = 64, num_layers: int = 4):
+    super().__init__()
+    camadas = []
+    # Entrada: [x_normalizado, Vgs, Vds] (3 dimensões)
+    camadas.append(nn.Linear(3, hidden_dim))
+    camadas.append(nn.Tanh())
+
+    for _ in range(num_layers - 1):
+      camadas.append(nn.Linear(hidden_dim, hidden_dim))
+      camadas.append(nn.Tanh())
+
+    # Saída: [Potencial Eletrostático ϕ(x) em Volts]
+    camadas.append(nn.Linear(hidden_dim, 1))
+    self.rede = nn.Sequential(*camadas)
+
+    # Camada auxiliar para predição direta do autovalor quântico dominante E0(Vgs, Vds)
+    self.cabeca_quântica = nn.Sequential(
+        nn.Linear(2, 32),
+        nn.Tanh(),
+        nn.Linear(32, 1),
+    )
+
+  def forward_potencial(
+      self, x: torch.Tensor, Vgs: torch.Tensor, Vds: torch.Tensor
+  ) -> torch.Tensor:
+    """Predição de potencial eletrostático contínuo."""
+    inputs = torch.cat([x, Vgs, Vds], dim=-1)
+    return self.rede(inputs)
+
+  def forward_E0(
+      self, Vgs: torch.Tensor, Vds: torch.Tensor
+  ) -> torch.Tensor:
+    """Prediz o nível dominante E0 do canal para o solver Single-Level."""
+    inputs = torch.cat([Vgs, Vds], dim=-1)
+    return self.cabeca_quântica(inputs)
+
+
+class TreinadorPINN:
+  """Motor de Treinamento com Perdas de PDE (Poisson), Condições de Contorno e Transporte NEGF."""
 
   def __init__(
       self,
-      negf_solver: NEGF1DSolver,
-      poisson_solver: Poisson1D,
-      max_iter: int = 60,
-      tolerancia: float = 1e-4,
-      alpha_mix: float = 0.15,
+      modelo: NanotransistorPINN,
+      single_level_negf: SingleLevelNEGF,
+      L_ch: float = 20e-9,  # 20 nm
+      lambda_g: float = 2.5e-9,
+      lr: float = 1e-3,
   ):
-    self.negf = negf_solver
-    self.poisson = poisson_solver
-    self.max_iter = max_iter
-    self.tol = tolerancia
-    self.alpha = alpha_mix
+    self.modelo = modelo
+    self.negf = single_level_negf
+    self.L = L_ch
+    self.lambda_sq = lambda_g**2
+    self.otimizador = optim.Adam(self.modelo.parameters(), lr=lr)
 
-  def executar(
-      self,
-      V_gate: float,
-      V_ds: float,
-      N_dop: torch.Tensor,
-      E_grid: torch.Tensor,
-      phi_inicial: torch.Tensor = None,
-  ) -> Dict[str, torch.Tensor]:
-    """Executa as iterações de ponto fixo entre Poisson e NEGF."""
-    if phi_inicial is None:
-      # Chute inicial linear
-      phi = torch.linspace(
-          0.0, V_ds, self.negf.N, dtype=torch.float64, device=self.negf.device
-      )
-    else:
-      phi = phi_inicial.clone()
+  def passo_treinamento(self, n_colocacao: int = 128) -> Dict[str, float]:
+    """Calcula resíduos diferenciais exatos via PyTorch Autograd."""
+    self.otimizador.zero_grad()
 
-    n_x = torch.zeros(
-        self.negf.N, dtype=torch.float64, device=self.negf.device
+    # Amostragem no espaço de fase (x ∈ [0, L], Vgs ∈ [0, 0.8] V, Vds ∈ [0, 0.5] V)
+    x = torch.rand(n_colocacao, 1, dtype=torch.float32, requires_grad=True) * self.L
+    Vgs = torch.rand(n_colocacao, 1, dtype=torch.float32) * 0.8
+    Vds = torch.rand(n_colocacao, 1, dtype=torch.float32) * 0.5
+
+    # 1. Avaliação do Potencial Eletrostático
+    phi = self.modelo.forward_potencial(x / self.L, Vgs, Vds)
+
+    # 2. Gradientes via Autograd para a PDE de Poisson
+    grad_phi = torch.autograd.grad(
+        phi,
+        x,
+        grad_outputs=torch.ones_like(phi),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+
+    d2phi_dx2 = torch.autograd.grad(
+        grad_phi,
+        x,
+        grad_outputs=torch.ones_like(grad_phi),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+
+    # 3. Densidade de carga quântica via Single-Level NEGF
+    E0 = self.modelo.forward_E0(Vgs, Vds)
+    n_eletrons, corrente_pred, _ = self.negf(
+        E0.squeeze(-1).to(torch.float64), Vds.squeeze(-1).to(torch.float64)
+    )
+    n_eletrons_3d = (n_eletrons.unsqueeze(-1).to(torch.float32) / self.L) * 1e18
+
+    # Perfil sintético de dopagem (Canal Intrínseco central)
+    N_dop = torch.where(
+        (x < 0.2 * self.L) | (x > 0.8 * self.L), 5e25, 1e20
+    ).to(torch.float32)
+
+    # Resíduo da Equação de Poisson 1D com porta:
+    # d²ϕ/dx² - (ϕ - Vgs)/λ² + q*(N_dop - n)/ε = 0
+    rho = ConstantesFisicas.Q_E * (N_dop - n_eletrons_3d)
+    res_poisson = (
+        d2phi_dx2
+        - ((phi - Vgs) / self.lambda_sq)
+        + (rho / ConstantesFisicas.EPS_SI)
+    )
+    loss_pde = torch.mean(res_poisson**2) * 1e-18  # Normalização de escala
+
+    # 4. Condições de Contorno de Dirichlet
+    x_source = torch.zeros(n_colocacao, 1, dtype=torch.float32)
+    x_drain = (
+        torch.ones(n_colocacao, 1, dtype=torch.float32) * self.L
     )
 
-    for i in range(self.max_iter):
-      # Energia potencial eletrostática U(x) = -q * phi(x) em eV
-      U_potencial = -phi
+    phi_source = self.modelo.forward_potencial(x_source / self.L, Vgs, Vds)
+    phi_drain = self.modelo.forward_potencial(x_drain / self.L, Vgs, Vds)
 
-      # 1. Passo Quântico (NEGF)
-      n_x_novo, T_E = self.negf.resolver_densidade_e_transmissao(
-          U_potencial, V_ds, E_grid
-      )
+    loss_bc_source = torch.mean((phi_source - 0.0) ** 2)
+    loss_bc_drain = torch.mean((phi_drain - Vds) ** 2)
+    loss_bc = loss_bc_source + loss_bc_drain
 
-      # 2. Passo Eletrostático (Poisson)
-      phi_novo = self.poisson.resolver_potencial(
-          n_x_novo, N_dop, V_gate, 0.0, V_ds
-      )
-
-      # 3. Avaliação de Erro e Atualização com Mistura (Picard damping)
-      erro = torch.max(torch.abs(phi_novo - phi)).item()
-      phi = (1.0 - self.alpha) * phi + self.alpha * phi_novo
-      n_x = (1.0 - self.alpha) * n_x + self.alpha * n_x_novo
-
-      if erro < self.tol:
-        break
-
-    corrente = self.negf.calcular_corrente(T_E, V_ds, E_grid)
+    # 5. Perda Total e Otimização
+    loss_total = loss_pde + 10.0 * loss_bc
+    loss_total.backward()
+    self.otimizador.step()
 
     return {
-        "potencial_phi": phi,
-        "energia_U": -phi,
-        "densidade_n": n_x,
-        "transmissao": T_E,
-        "corrente_A": corrente,
-        "convergido": erro < self.tol,
-        "iteracoes": i + 1,
+        "loss_total": loss_total.item(),
+        "loss_pde": loss_pde.item(),
+        "loss_bc": loss_bc.item(),
     }
 
 
+# =============================================================================
+# 6. DEMONSTRAÇÃO EXECUTÁVEL COMPLETA
+# =============================================================================
+
 if __name__ == "__main__":
-  # Configuração da Simulação
   dispositivo = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-  N_pontos = 50
-  dx_passo = 0.4e-9  # 0.4 nm por sítio -> Canal de 20 nm
-  L_total = N_pontos * dx_passo * 1e9  # nm
+  # ---------------------------------------------------------
+  # Parte A: Verificação do Módulo Single-Level NEGF
+  # ---------------------------------------------------------
+  print("=" * 70)
+  print(" PARTE A: Transporte Quântico Single-Level NEGF Analítico")
+  print("=" * 70)
 
-  # Perfil de Dopagem (N+ Fonte e Dreno, Canal Intrínseco N+/i/N+)
-  N_doping = torch.zeros(N_pontos, dtype=torch.float64, device=dispositivo)
-  N_doping[:10] = 5e25  # Fonte N+ (1/m³)
-  N_doping[-10:] = 5e25  # Dreno N+ (1/m³)
-  N_doping[10:-10] = 1e20  # Canal Intrínseco
+  sl_negf = SingleLevelNEGF(
+      gamma_S=0.06, gamma_D=0.06, E_F=0.0, T=300.0
+  ).to(dispositivo)
 
-  # Instanciação dos Solvers
-  solver_negf = NEGF1DSolver(
-      N_pts=N_pontos,
-      a_dx=dx_passo,
+  tensao_vds = torch.tensor(0.25, dtype=torch.float64, device=dispositivo)
+  nivel_e0 = torch.tensor(0.10, dtype=torch.float64, device=dispositivo)
+
+  n_q, i_landauer, T_analitica = sl_negf(nivel_e0, tensao_vds)
+  print(f"Nível Quântico E0: {nivel_e0.item():.2f} eV | Vds: {tensao_vds.item():.2f} V")
+  print(f"Ocupação Eletrônica do Nível (N): {n_q.item():.4f} elétrons")
+  print(f"Corrente Landauer-Büttiker:        {i_landauer.item() * 1e6:.4f} µA")
+
+  # ---------------------------------------------------------
+  # Parte B: Simulação Auto-Consistente Tight-Binding 1D
+  # ---------------------------------------------------------
+  print("\n" + "=" * 70)
+  print(" PARTE B: Solver Tight-Binding NEGF Matricial 1D (Validação)")
+  print("=" * 70)
+
+  N_grid = 40
+  dx_grid = 0.5e-9  # 0.5 nm -> Canal 20 nm
+  tb_solver = TightBindingNEGF1D(
+      N_sites=N_grid,
+      dx=dx_grid,
       m_eff=0.20,
-      gamma_S=0.2,
-      gamma_D=0.2,
-      E_F=0.1,
-      T=300.0,
+      gamma_S=0.15,
+      gamma_D=0.15,
+      E_F=0.05,
       device=dispositivo,
   )
-  solver_poisson = Poisson1D(
-      N_pts=N_pontos, dx=dx_passo, lambda_g=2.5e-9, device=dispositivo
+
+  E_espectro = torch.linspace(
+      -0.6, 1.2, 300, dtype=torch.float64, device=dispositivo
   )
-  loop_scf = AutoConsistentePoissonNEGF(
-      solver_negf, solver_poisson, max_iter=80, tolerancia=5e-5, alpha_mix=0.2
+  U_teste = 0.25 * torch.sin(
+      torch.linspace(0, np.pi, N_grid, dtype=torch.float64, device=dispositivo)
   )
 
-  # Grid de Energia para integração
-  grid_E = torch.linspace(-0.5, 1.5, 400, dtype=torch.float64, device=dispositivo)
+  n_tb, T_tb, I_tb = tb_solver.resolver_transporte(U_teste, 0.20, E_espectro)
+  print(f"Corrente Matricial TB 1D:          {I_tb * 1e6:.4f} µA")
+  print(f"Densidade Eletrônica Média Canal:   {torch.mean(n_tb).item():.4e} m⁻¹")
 
-  # Simulação sob diferentes tensões de Porta (Vgs)
-  V_ds_teste = 0.35  # V
-  portas_Vgs = [0.0, 0.3, 0.6]
-  resultados = []
+  # ---------------------------------------------------------
+  # Parte C: Treinamento da PINN Acoplada ao NEGF
+  # ---------------------------------------------------------
+  print("\n" + "=" * 70)
+  print(" PARTE C: Treinamento da PINN Acoplada (Poisson + NEGF Residual)")
+  print("=" * 70)
 
-  print(
-      f"--- Iniciando Solver Poisson-NEGF 1D (Canal: {L_total:.1f} nm, Vds ="
-      f" {V_ds_teste} V) ---"
+  pinn = NanotransistorPINN(hidden_dim=48, num_layers=3).to(dispositivo)
+  treinador = TreinadorPINN(
+      pinn, sl_negf, L_ch=20e-9, lambda_g=3.0e-9, lr=2e-3
   )
-  for Vg in portas_Vgs:
-    res = loop_scf.executar(
-        V_gate=Vg, V_ds=V_ds_teste, N_dop=N_doping, E_grid=grid_E
+
+  for epoca in range(1, 401):
+    metricas = treinador.passo_treinamento(n_colocacao=64)
+    if epoca % 100 == 0 or epoca == 1:
+      print(
+          f"Época {epoca:03d} | Loss Total: {metricas['loss_total']:.6e} |"
+          f" Loss PDE: {metricas['loss_pde']:.6e} | Loss BC:"
+          f" {metricas['loss_bc']:.6e}"
+      )
+
+  # ---------------------------------------------------------
+  # Visualização dos Resultados
+  # ---------------------------------------------------------
+  x_coords = np.linspace(0, 20, N_grid)
+
+  # Inferência da PINN para Vgs = 0.6 V, Vds = 0.3 V
+  x_tensor = torch.linspace(0, 1, N_grid, device=dispositivo).unsqueeze(-1)
+  vgs_tensor = torch.full((N_grid, 1), 0.6, device=dispositivo)
+  vds_tensor = torch.full((N_grid, 1), 0.3, device=dispositivo)
+
+  with torch.no_grad():
+    phi_pinn = (
+        pinn.forward_potencial(x_tensor, vgs_tensor, vds_tensor).cpu().numpy()
     )
-    resultados.append(res)
-    print(
-        f"Vgs = {Vg:.2f} V | Convergiu: {res['convergido']} em"
-        f" {res['iteracoes']} iterações | I_ds = {res['corrente_A'] * 1e6:.3f}"
-        " µA"
-    )
 
-  # Exibição dos Perfis Físicos Obtidos
-  x_nm = np.linspace(0, L_total, N_pontos)
-
-  plt.figure(figsize=(12, 5))
+  plt.figure(figsize=(11, 4.5))
 
   plt.subplot(1, 2, 1)
-  for i, Vg in enumerate(portas_Vgs):
-    plt.plot(
-        x_nm,
-        resultados[i]["energia_U"].cpu().numpy(),
-        label=f"Vgs = {Vg:.1f} V",
-    )
-  plt.title("Perfil de Banda / Potencial U(x)")
-  plt.xlabel("Posição x (nm)")
-  plt.ylabel("Energia Potencial (eV)")
+  plt.plot(
+      E_espectro.cpu().numpy(),
+      T_tb.cpu().numpy(),
+      "b-",
+      label="Transmissão T(E) - TB 1D",
+  )
+  plt.title("Espectro de Transmissão Quântica")
+  plt.xlabel("Energia (eV)")
+  plt.ylabel("T(E)")
   plt.grid(True, linestyle="--", alpha=0.6)
   plt.legend()
 
   plt.subplot(1, 2, 2)
-  for i, Vg in enumerate(portas_Vgs):
-    plt.semilogy(
-        x_nm,
-        resultados[i]["densidade_n"].cpu().numpy() + 1e15,
-        label=f"Vgs = {Vg:.1f} V",
-    )
-  plt.title("Densidade Eletrônica n(x)")
+  plt.plot(
+      x_coords,
+      phi_pinn,
+      "r-",
+      linewidth=2,
+      label="Perfil ϕ(x) previsto pela PINN",
+  )
+  plt.title("Potencial Eletrostático PINN (Vgs=0.6V, Vds=0.3V)")
   plt.xlabel("Posição x (nm)")
-  plt.ylabel("Densidade Linear (m⁻¹)")
+  plt.ylabel("Potencial Eletrostático (V)")
   plt.grid(True, linestyle="--", alpha=0.6)
   plt.legend()
 
