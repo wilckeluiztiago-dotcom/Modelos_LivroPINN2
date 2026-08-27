@@ -29,7 +29,7 @@ O livro completo em formato digital (**PDF de alta resolução com código comen
 
 <div align="center">
 
-### 🏷️ **Valor: R$ 60,00**
+### 🏷️ **Valor: R$ 40,00**
 
 #### 🔑 **Chave PIX (E-mail):**
 ```text
